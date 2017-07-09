@@ -1,123 +1,162 @@
 #pragma once
 
-class CPUThread;
+#include "vm_ptr.h"
 
 namespace vm
 {
-	template<typename T> class page_alloc_t
+	template<memory_location_t Location = vm::main>
+	struct page_allocator
 	{
-		u32 m_addr;
-
-		void dealloc()
+		static inline vm::addr_t alloc(u32 size, u32 align)
 		{
-			if (m_addr)
-			{
-				vm::dealloc_verbose_nothrow(m_addr);
-			}
+			return vm::cast(vm::alloc(size, Location, std::max<u32>(align, 4096)));
 		}
 
-	public:
-		page_alloc_t()
-			: m_addr(0)
+		static inline void dealloc(u32 addr, u32 size = 0) noexcept
 		{
-		}
-
-		page_alloc_t(vm::memory_location_t location, u32 count = 1)
-			: m_addr(vm::alloc(sizeof32(T) * count, location, std::max<u32>(alignof32(T), 4096)))
-		{
-		}
-
-		page_alloc_t(const page_alloc_t&) = delete;
-
-		page_alloc_t(page_alloc_t&& other)
-			: m_addr(other.m_addr)
-		{
-			other.m_addr = 0;
-		}
-
-		~page_alloc_t()
-		{
-			this->dealloc();
-		}
-
-		page_alloc_t& operator =(const page_alloc_t&) = delete;
-
-		page_alloc_t& operator =(page_alloc_t&& other)
-		{
-			std::swap(m_addr, other.m_addr);
-
-			return *this;
-		}
-
-		u32 get_addr() const
-		{
-			return m_addr;
+			return vm::dealloc_verbose_nothrow(addr, Location);
 		}
 	};
 
-	template<typename T> class stack_alloc_t
+	template<typename T>
+	struct stack_allocator
 	{
-		u32 m_addr;
-		u32 m_old_pos; // TODO: use the stack to save it?
-
-		CPUThread& m_thread;
-
-	public:
-		stack_alloc_t() = delete;
-
-		stack_alloc_t(CPUThread& thread, u32 count = 1)
-			: m_addr(vm::stack_push(thread, sizeof32(T) * count, alignof32(T), m_old_pos))
-			, m_thread(thread)
+		static inline vm::addr_t alloc(u32 size, u32 align)
 		{
+			return vm::cast(T::stack_push(size, align));
 		}
 
-		~stack_alloc_t() noexcept(false) // allow exceptions
+		static inline void dealloc(u32 addr, u32 size) noexcept
 		{
-			if (!std::uncaught_exception()) // don't call during stack unwinding (it's pointless anyway)
-			{
-				vm::stack_pop(m_thread, m_addr, m_old_pos);
-			}
-		}
-
-		stack_alloc_t(const stack_alloc_t&) = delete;
-
-		stack_alloc_t(stack_alloc_t&&) = delete;
-
-		stack_alloc_t& operator =(const stack_alloc_t&) = delete;
-
-		stack_alloc_t& operator =(stack_alloc_t&&) = delete;
-
-		u32 get_addr() const
-		{
-			return m_addr;
+			T::stack_pop_verbose(addr, size);
 		}
 	};
 
-	template<typename T, template<typename> class A> class _var_base final : public _ptr_base<T>, private A<T>
+	// Variable general specialization
+	template<typename T, typename A>
+	class _var_base final : public _ptr_base<T, const u32>
 	{
-		using _ptr_base<T>::m_addr;
-
-		using allocation = A<T>;
+		using pointer = _ptr_base<T, const u32>;
 
 	public:
-		template<typename... Args, typename = std::enable_if_t<std::is_constructible<A<T>, Args...>::value>> _var_base(Args&&... args)
-			: allocation(std::forward<Args>(args)...)
+		_var_base()
+			: pointer(A::alloc(SIZE_32(T), ALIGN_32(T)))
 		{
-			m_addr = allocation::get_addr();
+		}
+
+		_var_base(const T& right)
+			: _var_base()
+		{
+			std::memcpy(pointer::get_ptr(), &right, sizeof(T));
+		}
+
+		_var_base(_var_base&& right)
+			: pointer(right)
+		{
+			reinterpret_cast<u32&>(static_cast<pointer&>(right)) = 0;
+		}
+
+		~_var_base()
+		{
+			if (pointer::addr()) A::dealloc(pointer::addr(), SIZE_32(T));
 		}
 	};
 
-	template<typename T, template<typename> class A = vm::stack_alloc_t> using varl = _var_base<to_le_t<T>, A>;
+	// Dynamic length array variable
+	template<typename T, typename A>
+	class _var_base<T[], A> final : public _ptr_base<T, const u32>
+	{
+		using pointer = _ptr_base<T, const u32>;
 
-	template<typename T, template<typename> class A = vm::stack_alloc_t> using varb = _var_base<to_be_t<T>, A>;
+		u32 m_size;
+
+	public:
+		_var_base(u32 count)
+			: pointer(A::alloc(SIZE_32(T) * count, ALIGN_32(T)))
+			, m_size(SIZE_32(T) * count)
+		{
+		}
+
+		_var_base(_var_base&& right)
+			: pointer(right)
+			, m_size(right.m_size)
+		{
+			reinterpret_cast<u32&>(static_cast<pointer&>(right)) = 0;
+		}
+
+		~_var_base()
+		{
+			if (pointer::addr()) A::dealloc(pointer::addr(), m_size);
+		}
+
+		// Remove operator ->
+		T* operator ->() const = delete;
+
+		u32 get_count() const
+		{
+			return m_size / SIZE_32(T);
+		}
+	};
+
+	// LE variable
+	template<typename T, typename A> using varl = _var_base<to_le_t<T>, A>;
+
+	// BE variable
+	template<typename T, typename A> using varb = _var_base<to_be_t<T>, A>;
 
 	namespace ps3
 	{
-		template<typename T, template<typename> class A = vm::stack_alloc_t> using var = varb<T, A>;
+		// BE variable
+		template<typename T, typename A = stack_allocator<ppu_thread>> using var = varb<T, A>;
+
+		// Make BE variable initialized from value
+		template<typename T, typename A = stack_allocator<ppu_thread>>
+		inline auto make_var(const T& value)
+		{
+			return varb<T, A>(value);
+		}
+
+		// Make char[] variable initialized from std::string
+		template<typename A = stack_allocator<ppu_thread>>
+		static auto make_str(const std::string& str)
+		{
+			var<char[], A> var_(size32(str) + 1);
+			std::memcpy(var_.get_ptr(), str.c_str(), str.size() + 1);
+			return var_;
+		}
+
+		// Global HLE variable
+		template<typename T>
+		struct gvar : ptr<T>
+		{
+		};
 	}
 
 	namespace psv
 	{
-		template<typename T, template<typename> class A = vm::stack_alloc_t> using var = varl<T, A>;
+		// LE variable
+		template<typename T, typename A = stack_allocator<ARMv7Thread>> using var = varl<T, A>;
+
+		// Make LE variable initialized from value
+		template<typename T, typename A = stack_allocator<ARMv7Thread>>
+		inline auto make_var(const T& value)
+		{
+			return var<T, A>(value);
+		}
+
+		// Make char[] variable initialized from std::string
+		template<typename A = stack_allocator<ARMv7Thread>>
+		static auto make_str(const std::string& str)
+		{
+			var<char[], A> var_(size32(str) + 1);
+			std::memcpy(var_.get_ptr(), str.c_str(), str.size() + 1);
+			return var_;
+		}
+
+		// Global HLE variable
+		template<typename T>
+		struct gvar : ptr<T>
+		{
+		};
 	}
 }

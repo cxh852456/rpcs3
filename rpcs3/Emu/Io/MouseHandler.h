@@ -1,5 +1,7 @@
 #pragma once
 
+// TODO: HLE info (constants, structs, etc.) should not be available here
+
 enum MousePortStatus
 {
 	CELL_MOUSE_STATUS_DISCONNECTED = 0x00000000,
@@ -92,6 +94,8 @@ struct Mouse
 		: m_data()
 		, m_rawdata()
 	{
+		x_pos = 0;
+		y_pos = 0;
 	}
 };
 
@@ -102,8 +106,8 @@ protected:
 	std::vector<Mouse> m_mice;
 
 public:
-	virtual void Init(const u32 max_connect)=0;
-	virtual void Close()=0;
+	virtual void Init(const u32 max_connect) = 0;
+	virtual ~MouseHandlerBase() = default;
 
 	void Button(u8 button, bool pressed)
 	{

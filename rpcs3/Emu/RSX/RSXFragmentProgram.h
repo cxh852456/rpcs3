@@ -1,6 +1,16 @@
 #pragma once
+#include "GCM.h"
+#include "RSXTexture.h"
 
-enum
+enum register_type
+{
+	RSX_FP_REGISTER_TYPE_TEMP = 0,
+	RSX_FP_REGISTER_TYPE_INPUT = 1,
+	RSX_FP_REGISTER_TYPE_CONSTANT = 2,
+	RSX_FP_REGISTER_TYPE_UNKNOWN = 3,
+};
+
+enum fp_opcode
 {
 	RSX_FP_OPCODE_NOP        = 0x00, // No-Operation
 	RSX_FP_OPCODE_MOV        = 0x01, // Move
@@ -71,7 +81,7 @@ enum
 	RSX_FP_OPCODE_RET        = 0x45  // Return
 };
 
-static union OPDEST
+union OPDEST
 {
 	u32 HEX;
 
@@ -93,9 +103,9 @@ static union OPDEST
 		u32 no_dest          : 1;
 		u32 saturate         : 1; // _sat
 	};
-} dst;
+};
 
-static union SRC0
+union SRC0
 {
 	u32 HEX;
 
@@ -120,9 +130,9 @@ static union SRC0
 		u32 cond_mod_reg_index : 1;
 		u32 cond_reg_index     : 1;
 	};
-} src0;
+};
 
-static union SRC1
+union SRC1
 {
 	u32 HEX;
 
@@ -158,9 +168,9 @@ static union SRC1
 		u32                  : 1;
 		u32 increment        : 8; // Increment value for LOOP
 	};
-} src1;
+};
 
-static union SRC2
+union SRC2
 {
 	u32 HEX;
 
@@ -181,7 +191,7 @@ static union SRC2
 		u32 use_index_reg    : 1;
 		u32 perspective_corr : 1;
 	};
-} src2;
+};
 
 static const char* rsx_fp_input_attr_regs[] =
 {
@@ -207,15 +217,52 @@ static const std::string rsx_fp_op_names[] =
 struct RSXFragmentProgram
 {
 	u32 size;
-	u32 addr;
+	void *addr;
 	u32 offset;
 	u32 ctrl;
+	u16 unnormalized_coords;
+	u16 redirected_textures;
+	u16 shadow_textures;
+	rsx::comparison_function alpha_func;
+	bool front_back_color_enabled : 1;
+	bool back_color_diffuse_output : 1;
+	bool back_color_specular_output : 1;
+	bool front_color_diffuse_output : 1;
+	bool front_color_specular_output : 1;
+	u32 texture_dimensions;
+	rsx::window_origin origin_mode;
+	rsx::window_pixel_center pixel_center_mode;
+	rsx::fog_mode fog_equation;
+	u16 height;
+
+	float texture_pitch_scale[16];
+	u8 textures_alpha_kill[16];
+	u32 textures_zfunc[16];
+
+	rsx::texture_dimension_extended get_texture_dimension(u8 id) const
+	{
+		return (rsx::texture_dimension_extended)((texture_dimensions >> (id * 2)) & 0x3);
+	}
+
+	void set_texture_dimension(const std::array<rsx::texture_dimension_extended, 16> &dimensions)
+	{
+		size_t id = 0;
+		for (const rsx::texture_dimension_extended &dim : dimensions)
+		{
+			texture_dimensions &= ~(0x3 << (id * 2));
+			u8 d = (u8)dim;
+			texture_dimensions |= ((d & 0x3) << (id * 2));
+			id++;
+		}
+	}
 
 	RSXFragmentProgram()
 		: size(0)
 		, addr(0)
 		, offset(0)
 		, ctrl(0)
+		, unnormalized_coords(0)
+		, texture_dimensions(0)
 	{
 	}
 };

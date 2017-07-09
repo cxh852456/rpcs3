@@ -1,42 +1,29 @@
+#ifdef _MSC_VER
 #include "stdafx.h"
-#if defined(DX12_SUPPORT)
+#include "stdafx_d3d12.h"
 #include "D3D12GSRender.h"
+#include "d3dx12.h"
+#include "../Common/TextureUtils.h"
 // For clarity this code deals with texture but belongs to D3D12GSRender class
+#include "D3D12Formats.h"
+#include "../rsx_methods.h"
 
-
-static
-u32 LinearToSwizzleAddress(u32 x, u32 y, u32 z, u32 log2_width, u32 log2_height, u32 log2_depth)
+bool is_dxtc_format(u32 texture_format)
 {
-	u32 offset = 0;
-	u32 shift_count = 0;
-	while (log2_width | log2_height | log2_depth) {
-		if (log2_width)
-		{
-			offset |= (x & 0x01) << shift_count;
-			x >>= 1;
-			++shift_count;
-			--log2_width;
-		}
-		if (log2_height)
-		{
-			offset |= (y & 0x01) << shift_count;
-			y >>= 1;
-			++shift_count;
-			--log2_height;
-		}
-		if (log2_depth)
-		{
-			offset |= (z & 0x01) << shift_count;
-			z >>= 1;
-			++shift_count;
-			--log2_depth;
-		}
+	switch (texture_format)
+	{
+	case CELL_GCM_TEXTURE_COMPRESSED_DXT1:
+	case CELL_GCM_TEXTURE_COMPRESSED_DXT23:
+	case CELL_GCM_TEXTURE_COMPRESSED_DXT45:
+		return true;
+	default:
+		return false;
 	}
-	return offset;
 }
 
-static
-D3D12_COMPARISON_FUNC getSamplerCompFunc[] =
+namespace
+{
+D3D12_COMPARISON_FUNC get_sampler_compare_func[] =
 {
 	D3D12_COMPARISON_FUNC_NEVER,
 	D3D12_COMPARISON_FUNC_LESS,
@@ -48,846 +35,465 @@ D3D12_COMPARISON_FUNC getSamplerCompFunc[] =
 	D3D12_COMPARISON_FUNC_ALWAYS
 };
 
-static
-size_t getSamplerMaxAniso(size_t aniso)
-{
-	switch (aniso)
-	{
-	case CELL_GCM_TEXTURE_MAX_ANISO_1: return 1;
-	case CELL_GCM_TEXTURE_MAX_ANISO_2: return 2;
-	case CELL_GCM_TEXTURE_MAX_ANISO_4: return 4;
-	case CELL_GCM_TEXTURE_MAX_ANISO_6: return 6;
-	case CELL_GCM_TEXTURE_MAX_ANISO_8: return 8;
-	case CELL_GCM_TEXTURE_MAX_ANISO_10: return 10;
-	case CELL_GCM_TEXTURE_MAX_ANISO_12: return 12;
-	case CELL_GCM_TEXTURE_MAX_ANISO_16: return 16;
-	}
-
-	return 1;
-}
-
-static
-D3D12_TEXTURE_ADDRESS_MODE getSamplerWrap(size_t wrap)
-{
-	switch (wrap)
-	{
-	case CELL_GCM_TEXTURE_WRAP: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-	case CELL_GCM_TEXTURE_MIRROR: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
-	case CELL_GCM_TEXTURE_CLAMP_TO_EDGE: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-	case CELL_GCM_TEXTURE_BORDER: return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
-	case CELL_GCM_TEXTURE_CLAMP: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-	case CELL_GCM_TEXTURE_MIRROR_ONCE_CLAMP_TO_EDGE: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR_ONCE;
-	case CELL_GCM_TEXTURE_MIRROR_ONCE_BORDER: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR_ONCE;
-	case CELL_GCM_TEXTURE_MIRROR_ONCE_CLAMP: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR_ONCE;
-	}
-	return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-}
-
-static
-D3D12_FILTER getSamplerFilter(u32 minFilter, u32 magFilter)
-{
-	D3D12_FILTER_TYPE min, mag, mip;
-	switch (minFilter)
-	{
-	case CELL_GCM_TEXTURE_NEAREST:
-		min = D3D12_FILTER_TYPE_POINT;
-		mip = D3D12_FILTER_TYPE_POINT;
-		break;
-	case CELL_GCM_TEXTURE_LINEAR:
-		min = D3D12_FILTER_TYPE_LINEAR;
-		mip = D3D12_FILTER_TYPE_POINT;
-		break;
-	case CELL_GCM_TEXTURE_NEAREST_NEAREST:
-		min = D3D12_FILTER_TYPE_POINT;
-		mip = D3D12_FILTER_TYPE_POINT;
-		break;
-	case CELL_GCM_TEXTURE_LINEAR_NEAREST:
-		min = D3D12_FILTER_TYPE_LINEAR;
-		mip = D3D12_FILTER_TYPE_POINT;
-		break;
-	case CELL_GCM_TEXTURE_NEAREST_LINEAR:
-		min = D3D12_FILTER_TYPE_POINT;
-		mip = D3D12_FILTER_TYPE_LINEAR;
-		break;
-	case CELL_GCM_TEXTURE_LINEAR_LINEAR:
-		min = D3D12_FILTER_TYPE_LINEAR;
-		mip = D3D12_FILTER_TYPE_LINEAR;
-		break;
-	case CELL_GCM_TEXTURE_CONVOLUTION_MIN:
-	default:
-		LOG_ERROR(RSX, "Unknow min filter %x", minFilter);
-	}
-
-	switch (magFilter)
-	{
-	case CELL_GCM_TEXTURE_NEAREST:
-		mag = D3D12_FILTER_TYPE_POINT;
-		break;
-	case CELL_GCM_TEXTURE_LINEAR:
-		mag = D3D12_FILTER_TYPE_LINEAR;
-		break;
-	default:
-		LOG_ERROR(RSX, "Unknow mag filter %x", magFilter);
-	}
-
-	return D3D12_ENCODE_BASIC_FILTER(min, mag, mip, D3D12_FILTER_REDUCTION_TYPE_STANDARD);
-}
-
-static
-D3D12_SAMPLER_DESC getSamplerDesc(const RSXTexture &texture)
+D3D12_SAMPLER_DESC get_sampler_desc(const rsx::fragment_texture &texture)
 {
 	D3D12_SAMPLER_DESC samplerDesc = {};
-	samplerDesc.Filter = getSamplerFilter(texture.GetMinFilter(), texture.GetMagFilter());
-	samplerDesc.AddressU = getSamplerWrap(texture.GetWrapS());
-	samplerDesc.AddressV = getSamplerWrap(texture.GetWrapT());
-	samplerDesc.AddressW = getSamplerWrap(texture.GetWrapR());
-	samplerDesc.ComparisonFunc = getSamplerCompFunc[texture.GetZfunc()];
-	samplerDesc.MaxAnisotropy = (UINT)getSamplerMaxAniso(texture.GetMaxAniso());
-	samplerDesc.MipLODBias = texture.GetBias();
-	samplerDesc.BorderColor[4] = (FLOAT)texture.GetBorderColor();
-	samplerDesc.MinLOD = (FLOAT)(texture.GetMinLOD() >> 8);
-	samplerDesc.MaxLOD = (FLOAT)(texture.GetMaxLOD() >> 8);
+	samplerDesc.Filter = get_texture_filter(texture.min_filter(), texture.mag_filter());
+	samplerDesc.AddressU = get_texture_wrap_mode(texture.wrap_s());
+	samplerDesc.AddressV = get_texture_wrap_mode(texture.wrap_t());
+	samplerDesc.AddressW = get_texture_wrap_mode(texture.wrap_r());
+	samplerDesc.ComparisonFunc = get_sampler_compare_func[texture.zfunc()];
+	samplerDesc.MaxAnisotropy = get_texture_max_aniso(texture.max_aniso());
+	samplerDesc.MipLODBias = texture.bias();
+	samplerDesc.BorderColor[0] = (FLOAT)texture.border_color();
+	samplerDesc.BorderColor[1] = (FLOAT)texture.border_color();
+	samplerDesc.BorderColor[2] = (FLOAT)texture.border_color();
+	samplerDesc.BorderColor[3] = (FLOAT)texture.border_color();
+	samplerDesc.MinLOD = (FLOAT)(texture.min_lod() >> 8);
+	samplerDesc.MaxLOD = (FLOAT)(texture.max_lod() >> 8);
 	return samplerDesc;
 }
 
-struct MipmapLevelInfo
+namespace
 {
-	size_t offset;
-	size_t width;
-	size_t height;
-	size_t rowPitch;
-};
-
-#define MAX2(a, b) ((a) > (b)) ? (a) : (b)
-
-/**
- * Write data, assume src pixels are packed but not mipmaplevel
- */
-static std::vector<MipmapLevelInfo>
-writeTexelsGeneric(const char *src, char *dst, size_t widthInBlock, size_t heightInBlock, size_t blockSize, size_t mipmapCount)
-{
-	std::vector<MipmapLevelInfo> Result;
-	size_t offsetInDst = 0, offsetInSrc = 0;
-	size_t currentHeight = heightInBlock, currentWidth = widthInBlock;
-	for (unsigned mipLevel = 0; mipLevel < mipmapCount; mipLevel++)
+	CD3DX12_RESOURCE_DESC get_texture_description(const rsx::fragment_texture &texture)
 	{
-		size_t rowPitch = align(currentWidth * blockSize, 256);
+		const u8 format = texture.format() & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
+		DXGI_FORMAT dxgi_format = get_texture_format(format);
+		u16 width = texture.width();
+		u16 height = texture.height();
+		u16 depth = texture.depth();
+		u16 miplevels = texture.get_exact_mipmap_count();
 
-		MipmapLevelInfo currentMipmapLevelInfo = {};
-		currentMipmapLevelInfo.offset = offsetInDst;
-		currentMipmapLevelInfo.height = currentHeight;
-		currentMipmapLevelInfo.width = currentWidth;
-		currentMipmapLevelInfo.rowPitch = rowPitch;
-		Result.push_back(currentMipmapLevelInfo);
+		// DXTC uses 4x4 block texture and align to multiple of 4.
+		if (is_dxtc_format(format))
+		{
+			width = align(width, 4);
+			height = align(height, 4);
+		}
 
-		for (unsigned row = 0; row < currentHeight; row++)
-			memcpy((char*)dst + offsetInDst + row * rowPitch, (char*)src + offsetInSrc + row * widthInBlock * blockSize, currentWidth * blockSize);
-
-		offsetInDst += currentHeight * rowPitch;
-		offsetInDst = align(offsetInDst, 512);
-		offsetInSrc += currentHeight * widthInBlock * blockSize;
-		currentHeight = MAX2(currentHeight / 2, 1);
-		currentWidth = MAX2(currentWidth / 2, 1);
+		switch (texture.get_extended_texture_dimension())
+		{
+		case rsx::texture_dimension_extended::texture_dimension_1d:
+			return CD3DX12_RESOURCE_DESC::Tex1D(dxgi_format, width, 1, miplevels);
+		case rsx::texture_dimension_extended::texture_dimension_2d:
+			return CD3DX12_RESOURCE_DESC::Tex2D(dxgi_format, width, height, 1, miplevels);
+		case rsx::texture_dimension_extended::texture_dimension_cubemap:
+			return CD3DX12_RESOURCE_DESC::Tex2D(dxgi_format, width, height, 6, miplevels);
+		case rsx::texture_dimension_extended::texture_dimension_3d:
+			return CD3DX12_RESOURCE_DESC::Tex3D(dxgi_format, width, height, depth, miplevels);
+		}
+		fmt::throw_exception("Unknown texture dimension" HERE);
 	}
-	return Result;
 }
 
-/**
-* Write data, assume src pixels are swizzled and but not mipmaplevel
-*/
-static std::vector<MipmapLevelInfo>
-writeTexelsSwizzled(const char *src, char *dst, size_t widthInBlock, size_t heightInBlock, size_t blockSize, size_t mipmapCount)
-{
-	std::vector<MipmapLevelInfo> Result;
-	size_t offsetInDst = 0, offsetInSrc = 0;
-	size_t currentHeight = heightInBlock, currentWidth = widthInBlock;
-	for (unsigned mipLevel = 0; mipLevel < mipmapCount; mipLevel++)
+namespace {
+	/**
+	 * Allocate buffer in texture_buffer_heap big enough and upload data into existing_texture which should be in COPY_DEST state
+	 */
+	void update_existing_texture(
+		const rsx::fragment_texture &texture,
+		ID3D12GraphicsCommandList *command_list,
+		d3d12_data_heap &texture_buffer_heap,
+		ID3D12Resource *existing_texture)
 	{
-		size_t rowPitch = align(currentWidth * blockSize, 256);
+		size_t w = texture.width(), h = texture.height();
 
-		MipmapLevelInfo currentMipmapLevelInfo = {};
-		currentMipmapLevelInfo.offset = offsetInDst;
-		currentMipmapLevelInfo.height = currentHeight;
-		currentMipmapLevelInfo.width = currentWidth;
-		currentMipmapLevelInfo.rowPitch = rowPitch;
-		Result.push_back(currentMipmapLevelInfo);
+		const u8 format = texture.format() & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
+		DXGI_FORMAT dxgi_format = get_texture_format(format);
 
-		u32 *castedSrc, *castedDst;
-		u32 log2width, log2height;
+		size_t buffer_size = get_placed_texture_storage_size(texture, 256);
+		size_t heap_offset = texture_buffer_heap.alloc<D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT>(buffer_size);
+		size_t mip_level = 0;
 
-		castedSrc = (u32*)src + offsetInSrc;
-		castedDst = (u32*)dst + offsetInDst;
+		void *mapped_buffer_ptr = texture_buffer_heap.map<void>(CD3DX12_RANGE(heap_offset, heap_offset + buffer_size));
+		gsl::span<gsl::byte> mapped_buffer{ (gsl::byte*)mapped_buffer_ptr, ::narrow<int>(buffer_size) };
+		std::vector<rsx_subresource_layout> input_layouts = get_subresources_layout(texture);
+		u8 block_size_in_bytes = get_format_block_size_in_bytes(format);
+		u8 block_size_in_texel = get_format_block_size_in_texel(format);
+		bool is_swizzled = !(texture.format() & CELL_GCM_TEXTURE_LN);
+		size_t offset_in_buffer = 0;
+		for (const rsx_subresource_layout &layout : input_layouts)
+		{
+			upload_texture_subresource(mapped_buffer.subspan(offset_in_buffer), layout, format, is_swizzled, 256);
+			UINT row_pitch = align(layout.width_in_block * block_size_in_bytes, 256);
+			command_list->CopyTextureRegion(&CD3DX12_TEXTURE_COPY_LOCATION(existing_texture, (UINT)mip_level), 0, 0, 0,
+				&CD3DX12_TEXTURE_COPY_LOCATION(texture_buffer_heap.get_heap(),
+				{ heap_offset + offset_in_buffer,
+				{
+					dxgi_format,
+					(UINT)layout.width_in_block * block_size_in_texel,
+					(UINT)layout.height_in_block * block_size_in_texel,
+					(UINT)layout.depth,
+					row_pitch
+				}
+				}), nullptr);
 
-		log2width = (u32)(logf((float)currentWidth) / logf(2.f));
-		log2height = (u32)(logf((float)currentHeight) / logf(2.f));
+			offset_in_buffer += row_pitch * layout.height_in_block * layout.depth;
+			offset_in_buffer = align(offset_in_buffer, 512);
+			mip_level++;
+		}
+		texture_buffer_heap.unmap(CD3DX12_RANGE(heap_offset, heap_offset + buffer_size));
 
-#pragma omp parallel for
-		for (int row = 0; row < currentHeight; row++)
-			for (int j = 0; j < currentWidth; j++)
-				castedDst[(row * rowPitch / 4) + j] = castedSrc[LinearToSwizzleAddress(j, row, 0, log2width, log2height, 0)];
-
-		offsetInDst += currentHeight * rowPitch;
-		offsetInSrc += currentHeight * widthInBlock * blockSize;
-		currentHeight = MAX2(currentHeight / 2, 1);
-		currentWidth = MAX2(currentWidth / 2, 1);
+		command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(existing_texture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ));
 	}
-	return Result;
 }
 
-
-/**
-* Write data, assume compressed (DXTCn) format
-*/
-static std::vector<MipmapLevelInfo>
-writeCompressedTexel(const char *src, char *dst, size_t widthInBlock, size_t blockWidth, size_t heightInBlock, size_t blockHeight, size_t blockSize, size_t mipmapCount)
-{
-	std::vector<MipmapLevelInfo> Result;
-	size_t offsetInDst = 0, offsetInSrc = 0;
-	size_t currentHeight = heightInBlock, currentWidth = widthInBlock;
-	for (unsigned mipLevel = 0; mipLevel < mipmapCount; mipLevel++)
-	{
-		size_t rowPitch = align(currentWidth * blockSize, 256);
-
-		MipmapLevelInfo currentMipmapLevelInfo = {};
-		currentMipmapLevelInfo.offset = offsetInDst;
-		currentMipmapLevelInfo.height = currentHeight * blockHeight;
-		currentMipmapLevelInfo.width = currentWidth * blockWidth;
-		currentMipmapLevelInfo.rowPitch = rowPitch;
-		Result.push_back(currentMipmapLevelInfo);
-
-		for (unsigned row = 0; row < currentHeight; row++)
-			memcpy((char*)dst + offsetInDst + row * rowPitch, (char*)src + offsetInSrc + row * currentWidth * blockSize, currentWidth * blockSize);
-
-		offsetInDst += currentHeight * rowPitch;
-		offsetInDst = align(offsetInDst, 512);
-		offsetInSrc += currentHeight * currentWidth * blockSize;
-		currentHeight = MAX2(currentHeight / 2, 1);
-		currentWidth = MAX2(currentWidth / 2, 1);
-	}
-	return Result;
-}
-
-
-/**
-* Write 16 bytes pixel textures, assume src pixels are swizzled and but not mipmaplevel
-*/
-static std::vector<MipmapLevelInfo>
-write16bTexelsSwizzled(const char *src, char *dst, size_t widthInBlock, size_t heightInBlock, size_t blockSize, size_t mipmapCount)
-{
-	std::vector<MipmapLevelInfo> Result;
-	size_t offsetInDst = 0, offsetInSrc = 0;
-	size_t currentHeight = heightInBlock, currentWidth = widthInBlock;
-	for (unsigned mipLevel = 0; mipLevel < mipmapCount; mipLevel++)
-	{
-		size_t rowPitch = align(currentWidth * blockSize, 256);
-
-		MipmapLevelInfo currentMipmapLevelInfo = {};
-		currentMipmapLevelInfo.offset = offsetInDst;
-		currentMipmapLevelInfo.height = currentHeight;
-		currentMipmapLevelInfo.width = currentWidth;
-		currentMipmapLevelInfo.rowPitch = rowPitch;
-		Result.push_back(currentMipmapLevelInfo);
-
-		u16 *castedSrc, *castedDst;
-		u16 log2width, log2height;
-
-		castedSrc = (u16*)src + offsetInSrc;
-		castedDst = (u16*)dst + offsetInDst;
-
-		log2width = (u32)(logf((float)currentWidth) / logf(2.f));
-		log2height = (u32)(logf((float)currentHeight) / logf(2.f));
-
-#pragma omp parallel for
-		for (int row = 0; row < currentHeight; row++)
-			for (int j = 0; j < currentWidth; j++)
-				castedDst[(row * rowPitch / 2) + j] = castedSrc[LinearToSwizzleAddress(j, row, 0, log2width, log2height, 0)];
-
-		offsetInDst += currentHeight * rowPitch;
-		offsetInSrc += currentHeight * widthInBlock * blockSize;
-		currentHeight = MAX2(currentHeight / 2, 1);
-		currentWidth = MAX2(currentWidth / 2, 1);
-	}
-	return Result;
-}
-
-/**
-* Write 16 bytes pixel textures, assume src pixels are packed but not mipmaplevel
-*/
-static std::vector<MipmapLevelInfo>
-write16bTexelsGeneric(const char *src, char *dst, size_t widthInBlock, size_t heightInBlock, size_t blockSize, size_t mipmapCount)
-{
-	std::vector<MipmapLevelInfo> Result;
-	size_t offsetInDst = 0, offsetInSrc = 0;
-	size_t currentHeight = heightInBlock, currentWidth = widthInBlock;
-	size_t srcPitch = widthInBlock * blockSize;
-	for (unsigned mipLevel = 0; mipLevel < mipmapCount; mipLevel++)
-	{
-		size_t rowPitch = align(currentWidth * blockSize, 256);
-
-		MipmapLevelInfo currentMipmapLevelInfo = {};
-		currentMipmapLevelInfo.offset = offsetInDst;
-		currentMipmapLevelInfo.height = currentHeight;
-		currentMipmapLevelInfo.width = currentWidth;
-		currentMipmapLevelInfo.rowPitch = rowPitch;
-		Result.push_back(currentMipmapLevelInfo);
-
-		unsigned short *castedDst = (unsigned short *)dst, *castedSrc = (unsigned short *)src;
-
-		for (unsigned row = 0; row < heightInBlock; row++)
-			for (int j = 0; j < currentWidth; j++)
-			{
-				u16 tmp = castedSrc[offsetInSrc / 2 + row * srcPitch / 2 + j];
-				castedDst[offsetInDst / 2 + row * rowPitch / 2 + j] = (tmp >> 8) | (tmp << 8);
-			}
-
-		offsetInDst += currentHeight * rowPitch;
-		offsetInSrc += currentHeight * widthInBlock * blockSize;
-		currentHeight = MAX2(currentHeight / 2, 1);
-		currentWidth = MAX2(currentWidth / 2, 1);
-	}
-	return Result;
-}
-
-/**
-* Write 16 bytes pixel textures, assume src pixels are packed but not mipmaplevel
-*/
-static std::vector<MipmapLevelInfo>
-write16bX4TexelsGeneric(const char *src, char *dst, size_t widthInBlock, size_t heightInBlock, size_t blockSize, size_t mipmapCount)
-{
-	std::vector<MipmapLevelInfo> Result;
-	size_t offsetInDst = 0, offsetInSrc = 0;
-	size_t currentHeight = heightInBlock, currentWidth = widthInBlock;
-	size_t srcPitch = widthInBlock * blockSize;
-	for (unsigned mipLevel = 0; mipLevel < mipmapCount; mipLevel++)
-	{
-		size_t rowPitch = align(currentWidth * blockSize, 256);
-
-		MipmapLevelInfo currentMipmapLevelInfo = {};
-		currentMipmapLevelInfo.offset = offsetInDst;
-		currentMipmapLevelInfo.height = currentHeight;
-		currentMipmapLevelInfo.width = currentWidth;
-		currentMipmapLevelInfo.rowPitch = rowPitch;
-		Result.push_back(currentMipmapLevelInfo);
-
-		unsigned short *castedDst = (unsigned short *)dst, *castedSrc = (unsigned short *)src;
-
-		for (unsigned row = 0; row < heightInBlock; row++)
-			for (int j = 0; j < currentWidth * 4; j++)
-			{
-				u16 tmp = castedSrc[offsetInSrc / 2 + row * srcPitch / 2 + j];
-				castedDst[offsetInDst / 2 + row * rowPitch / 2 + j] = (tmp >> 8) | (tmp << 8);
-			}
-
-		offsetInDst += currentHeight * rowPitch;
-		offsetInSrc += currentHeight * widthInBlock * blockSize;
-		currentHeight = MAX2(currentHeight / 2, 1);
-		currentWidth = MAX2(currentWidth / 2, 1);
-	}
-	return Result;
-}
 
 /**
  * Create a texture residing in default heap and generate uploads commands in commandList,
  * using a temporary texture buffer.
  */
-static
-ID3D12Resource *uploadSingleTexture(
-	const RSXTexture &texture,
+ComPtr<ID3D12Resource> upload_single_texture(
+	const rsx::fragment_texture &texture,
 	ID3D12Device *device,
-	ID3D12GraphicsCommandList *commandList,
-	DataHeap<ID3D12Heap, 65536> &textureBuffersHeap,
-	std::vector<ComPtr<ID3D12Resource> > &stagingRamTexture)
+	ID3D12GraphicsCommandList *command_list,
+	d3d12_data_heap &texture_buffer_heap)
 {
-	ID3D12Resource *vramTexture;
-	size_t w = texture.GetWidth(), h = texture.GetHeight();
-
-	size_t blockSizeInByte, blockWidthInPixel, blockHeightInPixel;
-	int format = texture.GetFormat() & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
-	DXGI_FORMAT dxgiFormat = getTextureDXGIFormat(format);
-
-	const u32 texaddr = GetAddress(texture.GetOffset(), texture.GetLocation());
-
-	bool is_swizzled = !(texture.GetFormat() & CELL_GCM_TEXTURE_LN);
-	size_t srcPitch;
-	switch (format)
-	{
-	case CELL_GCM_TEXTURE_COMPRESSED_HILO8:
-	case CELL_GCM_TEXTURE_COMPRESSED_HILO_S8:
-	case ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN) & CELL_GCM_TEXTURE_COMPRESSED_B8R8_G8R8:
-	case ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN) & CELL_GCM_TEXTURE_COMPRESSED_R8B8_R8G8:
-	default:
-		LOG_ERROR(RSX, "Unimplemented Texture format : %x", format);
-		break;
-	case CELL_GCM_TEXTURE_B8:
-		blockSizeInByte = 1;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w;
-		break;
-	case CELL_GCM_TEXTURE_A1R5G5B5:
-		blockSizeInByte = 2;
-		blockHeightInPixel = 1, blockWidthInPixel = 1;
-		srcPitch = w * 2;
-		break;
-	case CELL_GCM_TEXTURE_A4R4G4B4:
-		blockSizeInByte = 2;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 2;
-		break;
-	case CELL_GCM_TEXTURE_R5G6B5:
-		blockSizeInByte = 2;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 2;
-		break;
-	case CELL_GCM_TEXTURE_A8R8G8B8:
-		blockSizeInByte = 4;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 4;
-		break;
-	case CELL_GCM_TEXTURE_COMPRESSED_DXT1:
-		blockSizeInByte = 8;
-		blockWidthInPixel = 4, blockHeightInPixel = 4;
-		srcPitch = w * 2;
-		break;
-	case CELL_GCM_TEXTURE_COMPRESSED_DXT23:
-		blockSizeInByte = 16;
-		blockWidthInPixel = 4, blockHeightInPixel = 4;
-		srcPitch = w * 4;
-		break;
-	case CELL_GCM_TEXTURE_COMPRESSED_DXT45:
-		blockSizeInByte = 16;
-		blockWidthInPixel = 4, blockHeightInPixel = 4;
-		srcPitch = w * 4;
-		break;
-	case CELL_GCM_TEXTURE_G8B8:
-		blockSizeInByte = 2;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 2;
-		break;
-	case CELL_GCM_TEXTURE_R6G5B5:
-		// Not native
-		blockSizeInByte = 4;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 2;
-		break;
-	case CELL_GCM_TEXTURE_DEPTH24_D8:
-		blockSizeInByte = 4;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 4;
-		break;
-	case CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT:
-		blockSizeInByte = 4;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 4;
-		break;
-	case CELL_GCM_TEXTURE_DEPTH16:
-		blockSizeInByte = 2;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 2;
-		break;
-	case CELL_GCM_TEXTURE_DEPTH16_FLOAT:
-		blockSizeInByte = 2;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 2;
-		break;
-	case CELL_GCM_TEXTURE_X16:
-		blockSizeInByte = 2;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 2;
-		break;
-	case CELL_GCM_TEXTURE_Y16_X16:
-		blockSizeInByte = 4;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 4;
-		break;
-	case CELL_GCM_TEXTURE_R5G5B5A1:
-		blockSizeInByte = 2;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 2;
-		break;
-	case CELL_GCM_TEXTURE_W16_Z16_Y16_X16_FLOAT:
-		blockSizeInByte = 8;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 8;
-		break;
-	case CELL_GCM_TEXTURE_W32_Z32_Y32_X32_FLOAT:
-		blockSizeInByte = 16;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 16;
-		break;
-	case CELL_GCM_TEXTURE_X32_FLOAT:
-		blockSizeInByte = 4;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 4;
-		break;
-	case CELL_GCM_TEXTURE_D1R5G5B5:
-		blockSizeInByte = 2;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 2;
-		break;
-	case CELL_GCM_TEXTURE_Y16_X16_FLOAT:
-		blockSizeInByte = 4;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 4;
-		break;
-	case CELL_GCM_TEXTURE_D8R8G8B8:
-		blockSizeInByte = 4;
-		blockWidthInPixel = 1, blockHeightInPixel = 1;
-		srcPitch = w * 4;
-		break;
-	case CELL_GCM_TEXTURE_COMPRESSED_B8R8_G8R8:
-		blockSizeInByte = 4;
-		blockWidthInPixel = 2, blockHeightInPixel = 2;
-		srcPitch = w * 4;
-		break;
-	case CELL_GCM_TEXTURE_COMPRESSED_R8B8_R8G8:
-		blockSizeInByte = 4;
-		blockWidthInPixel = 2, blockHeightInPixel = 2;
-		srcPitch = w * 4;
-		break;
-	}
-
-	size_t heightInBlocks = (h + blockHeightInPixel - 1) / blockHeightInPixel;
-	size_t widthInBlocks = (w + blockWidthInPixel - 1) / blockWidthInPixel;
-	// Multiple of 256
-	size_t rowPitch = align(blockSizeInByte * widthInBlocks, 256);
-
-	ComPtr<ID3D12Resource> Texture;
-	size_t textureSize = rowPitch * heightInBlocks * 2; // * 4 for mipmap levels
-	assert(textureBuffersHeap.canAlloc(textureSize));
-	size_t heapOffset = textureBuffersHeap.alloc(textureSize);
-
-	ThrowIfFailed(device->CreatePlacedResource(
-		textureBuffersHeap.m_heap,
-		heapOffset,
-		&getBufferResourceDesc(textureSize),
-		D3D12_RESOURCE_STATE_GENERIC_READ,
-		nullptr,
-		IID_PPV_ARGS(Texture.GetAddressOf())
-		));
-	stagingRamTexture.push_back(Texture);
-
-	auto pixels = vm::get_ptr<const u8>(texaddr);
-	void *textureData;
-	ThrowIfFailed(Texture->Map(0, nullptr, (void**)&textureData));
-	std::vector<MipmapLevelInfo> mipInfos;
-
-	switch (format)
-	{
-	case CELL_GCM_TEXTURE_A8R8G8B8:
-	{
-		if (is_swizzled)
-			mipInfos = writeTexelsSwizzled((char*)pixels, (char*)textureData, w, h, 4, texture.GetMipmap());
-		else
-			mipInfos = writeTexelsGeneric((char*)pixels, (char*)textureData, w, h, 4, texture.GetMipmap());
-		break;
-	}
-	case CELL_GCM_TEXTURE_A1R5G5B5:
-	case CELL_GCM_TEXTURE_A4R4G4B4:
-	case CELL_GCM_TEXTURE_R5G6B5:
-	{
-		if (is_swizzled)
-			mipInfos = write16bTexelsSwizzled((char*)pixels, (char*)textureData, w, h, 2, texture.GetMipmap());
-		else
-			mipInfos = write16bTexelsGeneric((char*)pixels, (char*)textureData, w, h, 2, texture.GetMipmap());
-		break;
-	}
-	case CELL_GCM_TEXTURE_W16_Z16_Y16_X16_FLOAT:
-	{
-		mipInfos = write16bX4TexelsGeneric((char*)pixels, (char*)textureData, w, h, 8, texture.GetMipmap());
-		break;
-	}
-	case CELL_GCM_TEXTURE_COMPRESSED_DXT1:
-	case CELL_GCM_TEXTURE_COMPRESSED_DXT23:
-	case CELL_GCM_TEXTURE_COMPRESSED_DXT45:
-	{
-		mipInfos = writeCompressedTexel((char*)pixels, (char*)textureData, widthInBlocks, blockWidthInPixel, heightInBlocks, blockHeightInPixel, blockSizeInByte, texture.GetMipmap());
-		break;
-	}
-	default:
-	{
-		mipInfos = writeTexelsGeneric((char*)pixels, (char*)textureData, w, h, blockSizeInByte, texture.GetMipmap());
-		break;
-	}
-	}
-	Texture->Unmap(0, nullptr);
-
-	D3D12_RESOURCE_DESC texturedesc = getTexture2DResourceDesc(w, h, dxgiFormat, texture.GetMipmap());
-	textureSize = device->GetResourceAllocationInfo(0, 1, &texturedesc).SizeInBytes;
-
-	D3D12_HEAP_PROPERTIES heapProp = {};
-	heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-	ThrowIfFailed(device->CreateCommittedResource(
-		&heapProp,
+	ComPtr<ID3D12Resource> result;
+	CHECK_HRESULT(device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
 		D3D12_HEAP_FLAG_NONE,
-		&texturedesc,
+		&get_texture_description(texture),
 		D3D12_RESOURCE_STATE_COPY_DEST,
 		nullptr,
-		IID_PPV_ARGS(&vramTexture)
+		IID_PPV_ARGS(result.GetAddressOf())
 		));
 
-	size_t miplevel = 0;
-	for (const MipmapLevelInfo mli : mipInfos)
-	{
-		D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
-		dst.pResource = vramTexture;
-		dst.SubresourceIndex = (UINT)miplevel;
-		dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-		src.PlacedFootprint.Offset = mli.offset;
-		src.pResource = Texture.Get();
-		src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-		src.PlacedFootprint.Footprint.Depth = 1;
-		src.PlacedFootprint.Footprint.Width = (UINT)mli.width;
-		src.PlacedFootprint.Footprint.Height = (UINT)mli.height;
-		src.PlacedFootprint.Footprint.RowPitch = (UINT)mli.rowPitch;
-		src.PlacedFootprint.Footprint.Format = dxgiFormat;
-
-		commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-		miplevel++;
-	}
-
-	D3D12_RESOURCE_BARRIER barrier = {};
-	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-	barrier.Transition.pResource = vramTexture;
-	barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-	barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
-	commandList->ResourceBarrier(1, &barrier);
-	return vramTexture;
+	update_existing_texture(texture, command_list, texture_buffer_heap, result.Get());
+	return result;
 }
 
-/**
- * Get number of bytes occupied by texture in RSX mem
- */
-static
-size_t getTextureSize(const RSXTexture &texture)
-{
-	size_t w = texture.GetWidth(), h = texture.GetHeight();
 
-	int format = texture.GetFormat() & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
-	// TODO: Take mipmaps into account
-	switch (format)
+D3D12_SHADER_RESOURCE_VIEW_DESC get_srv_descriptor_with_dimensions(const rsx::fragment_texture &tex)
+{
+	D3D12_SHADER_RESOURCE_VIEW_DESC shared_resource_view_desc = {};
+	switch (tex.get_extended_texture_dimension())
 	{
-	case CELL_GCM_TEXTURE_COMPRESSED_HILO8:
-	case CELL_GCM_TEXTURE_COMPRESSED_HILO_S8:
-	case ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN) & CELL_GCM_TEXTURE_COMPRESSED_B8R8_G8R8:
-	case ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN) & CELL_GCM_TEXTURE_COMPRESSED_R8B8_R8G8:
-	default:
-		LOG_ERROR(RSX, "Unimplemented Texture format : %x", format);
-		return 0;
-	case CELL_GCM_TEXTURE_B8:
-		return w * h;
-	case CELL_GCM_TEXTURE_A1R5G5B5:
-		return w * h * 2;
-	case CELL_GCM_TEXTURE_A4R4G4B4:
-		return w * h * 2;
-	case CELL_GCM_TEXTURE_R5G6B5:
-		return w * h * 2;
-	case CELL_GCM_TEXTURE_A8R8G8B8:
-		return w * h * 4;
-	case CELL_GCM_TEXTURE_COMPRESSED_DXT1:
-		return w * h / 6;
-	case CELL_GCM_TEXTURE_COMPRESSED_DXT23:
-		return w * h / 4;
-	case CELL_GCM_TEXTURE_COMPRESSED_DXT45:
-		return w * h / 4;
-	case CELL_GCM_TEXTURE_G8B8:
-		return w * h * 2;
-	case CELL_GCM_TEXTURE_R6G5B5:
-		return w * h * 2;
-	case CELL_GCM_TEXTURE_DEPTH24_D8:
-		return w * h * 4;
-	case CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT:
-		return w * h * 4;
-	case CELL_GCM_TEXTURE_DEPTH16:
-		return w * h * 2;
-	case CELL_GCM_TEXTURE_DEPTH16_FLOAT:
-		return w * h * 2;
-	case CELL_GCM_TEXTURE_X16:
-		return w * h * 2;
-	case CELL_GCM_TEXTURE_Y16_X16:
-		return w * h * 4;
-	case CELL_GCM_TEXTURE_R5G5B5A1:
-		return w * h * 2;
-	case CELL_GCM_TEXTURE_W16_Z16_Y16_X16_FLOAT:
-		return w * h * 8;
-	case CELL_GCM_TEXTURE_W32_Z32_Y32_X32_FLOAT:
-		return w * h * 16;
-	case CELL_GCM_TEXTURE_X32_FLOAT:
-		return w * h * 4;
-	case CELL_GCM_TEXTURE_D1R5G5B5:
-		return w * h * 2;
-	case CELL_GCM_TEXTURE_Y16_X16_FLOAT:
-		return w * h * 4;
-	case CELL_GCM_TEXTURE_D8R8G8B8:
-		return w * h * 4;
-	case CELL_GCM_TEXTURE_COMPRESSED_B8R8_G8R8:
-		return w * h * 4;
-	case CELL_GCM_TEXTURE_COMPRESSED_R8B8_R8G8:
-		return w * h * 4;
+	case rsx::texture_dimension_extended::texture_dimension_1d:
+		shared_resource_view_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D;
+		shared_resource_view_desc.Texture1D.MipLevels = tex.get_exact_mipmap_count();
+		return shared_resource_view_desc;
+	case rsx::texture_dimension_extended::texture_dimension_2d:
+		shared_resource_view_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		shared_resource_view_desc.Texture2D.MipLevels = tex.get_exact_mipmap_count();
+		return shared_resource_view_desc;
+	case rsx::texture_dimension_extended::texture_dimension_cubemap:
+		shared_resource_view_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+		shared_resource_view_desc.TextureCube.MipLevels = tex.get_exact_mipmap_count();
+		return shared_resource_view_desc;
+	case rsx::texture_dimension_extended::texture_dimension_3d:
+		shared_resource_view_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+		shared_resource_view_desc.Texture3D.MipLevels = tex.get_exact_mipmap_count();
+		return shared_resource_view_desc;
 	}
+	fmt::throw_exception("Wrong texture dimension" HERE);
+}
 }
 
-size_t D3D12GSRender::UploadTextures(ID3D12GraphicsCommandList *cmdlist)
+void D3D12GSRender::upload_textures(ID3D12GraphicsCommandList *command_list, size_t texture_count)
 {
-	std::lock_guard<std::mutex> lock(mut);
-	size_t usedTexture = 0;
-
-	for (u32 i = 0; i < m_textures_count; ++i)
+	for (u32 i = 0; i < texture_count; ++i)
 	{
-		if (!m_textures[i].IsEnabled()) continue;
-		size_t w = m_textures[i].GetWidth(), h = m_textures[i].GetHeight();
-		if (!w || !h) continue;
+		if (!m_textures_dirty[i])
+			continue;
+		m_textures_dirty[i] = false;
 
-		const u32 texaddr = GetAddress(m_textures[i].GetOffset(), m_textures[i].GetLocation());
-
-		int format = m_textures[i].GetFormat() & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
-		DXGI_FORMAT dxgiFormat = getTextureDXGIFormat(format);
-		bool is_swizzled = !(m_textures[i].GetFormat() & CELL_GCM_TEXTURE_LN);
-
-		ID3D12Resource *vramTexture;
-		std::unordered_map<u32, ID3D12Resource* >::const_iterator ItRTT = m_rtts.m_renderTargets.find(texaddr);
-		std::unordered_map<u32, ID3D12Resource* >::const_iterator ItCache = m_texturesCache.find(texaddr);
-		bool isRenderTarget = false;
-		if (ItRTT != m_rtts.m_renderTargets.end())
+		if (!rsx::method_registers.fragment_textures[i].enabled())
 		{
-			vramTexture = ItRTT->second;
-			isRenderTarget = true;
+			// Now fill remaining texture slots with dummy texture/sampler
+
+			D3D12_SHADER_RESOURCE_VIEW_DESC shader_resource_view_desc = {};
+			shader_resource_view_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			shader_resource_view_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+			shader_resource_view_desc.Texture2D.MipLevels = 1;
+			shader_resource_view_desc.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+				D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0,
+				D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0,
+				D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0,
+				D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0);
+
+			m_device->CreateShaderResourceView(m_dummy_texture, &shader_resource_view_desc,
+				CD3DX12_CPU_DESCRIPTOR_HANDLE(m_current_texture_descriptors->GetCPUDescriptorHandleForHeapStart())
+				.Offset((UINT)i, m_descriptor_stride_srv_cbv_uav)
+				);
+
+			D3D12_SAMPLER_DESC sampler_desc = {};
+			sampler_desc.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+			sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+			sampler_desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+			sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+
+			m_device->CreateSampler(&sampler_desc,
+				CD3DX12_CPU_DESCRIPTOR_HANDLE(m_current_sampler_descriptors->GetCPUDescriptorHandleForHeapStart())
+				.Offset((UINT)i, m_descriptor_stride_samplers));
+
+			continue;
 		}
-		else if (ItCache != m_texturesCache.end())
+		size_t w = rsx::method_registers.fragment_textures[i].width(), h = rsx::method_registers.fragment_textures[i].height();
+		
+		if (!w || !h)
 		{
-			vramTexture = ItCache->second;
+			LOG_ERROR(RSX, "Texture upload requested but invalid texture dimensions passed");
+			continue;
+		}
+
+		const u32 texaddr = rsx::get_address(rsx::method_registers.fragment_textures[i].offset(), rsx::method_registers.fragment_textures[i].location());
+
+		const u8 format = rsx::method_registers.fragment_textures[i].format() & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
+		bool is_swizzled = !(rsx::method_registers.fragment_textures[i].format() & CELL_GCM_TEXTURE_LN);
+
+		ID3D12Resource *vram_texture;
+		std::pair<texture_entry, ComPtr<ID3D12Resource> > *cached_texture = m_texture_cache.find_data_if_available(texaddr);
+		bool is_render_target = false, is_depth_stencil_texture = false;
+
+		if (vram_texture = m_rtts.get_texture_from_render_target_if_applicable(texaddr))
+		{
+			is_render_target = true;
+		}
+		else if (vram_texture = m_rtts.get_texture_from_depth_stencil_if_applicable(texaddr))
+		{
+			is_depth_stencil_texture = true;
+		}
+		else if (cached_texture != nullptr && (cached_texture->first == texture_entry(format, w, h, rsx::method_registers.fragment_textures[i].depth(), rsx::method_registers.fragment_textures[i].get_exact_mipmap_count())))
+		{
+			if (cached_texture->first.m_is_dirty)
+			{
+				command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(cached_texture->second.Get(), D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_COPY_DEST));
+				update_existing_texture(rsx::method_registers.fragment_textures[i], command_list, m_buffer_data, cached_texture->second.Get());
+				m_texture_cache.protect_data(texaddr, texaddr, get_texture_size(rsx::method_registers.fragment_textures[i]));
+			}
+			vram_texture = cached_texture->second.Get();
 		}
 		else
 		{
-			vramTexture = uploadSingleTexture(m_textures[i], m_device.Get(), cmdlist, m_textureUploadData, getCurrentResourceStorage().m_singleFrameLifetimeResources);
-			m_texturesCache[texaddr] = vramTexture;
-
-			u32 s = (u32)align(getTextureSize(m_textures[i]), 4096);
-			LOG_WARNING(RSX, "PROTECTING %x of size %d", align(texaddr, 4096), s);
-			m_protectedTextures.push_back(std::make_tuple(texaddr, align(texaddr, 4096), s));
-			vm::page_protect(align(texaddr, 4096), s, 0, 0, vm::page_writable);
+			if (cached_texture != nullptr)
+				get_current_resource_storage().dirty_textures.push_back(m_texture_cache.remove_from_cache(texaddr));
+			ComPtr<ID3D12Resource> tex = upload_single_texture(rsx::method_registers.fragment_textures[i], m_device.Get(), command_list, m_buffer_data);
+			std::wstring name = L"texture_@" + std::to_wstring(texaddr);
+			tex->SetName(name.c_str());
+			vram_texture = tex.Get();
+			m_texture_cache.store_and_protect_data(texaddr, texaddr, get_texture_size(rsx::method_registers.fragment_textures[i]), format, w, h, rsx::method_registers.fragment_textures[i].depth(), rsx::method_registers.fragment_textures[i].get_exact_mipmap_count(), tex);
 		}
 
-		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-		srvDesc.Format = dxgiFormat;
-		srvDesc.Texture2D.MipLevels = m_textures[i].GetMipmap();
+		D3D12_SHADER_RESOURCE_VIEW_DESC shared_resource_view_desc = get_srv_descriptor_with_dimensions(rsx::method_registers.fragment_textures[i]);
+		shared_resource_view_desc.Format = get_texture_format(format);
+
+		bool requires_remap = false;
+		std::array<INT, 4> channel_mapping = {};
 
 		switch (format)
 		{
-		case CELL_GCM_TEXTURE_COMPRESSED_HILO8:
-		case CELL_GCM_TEXTURE_COMPRESSED_HILO_S8:
-		case ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN) & CELL_GCM_TEXTURE_COMPRESSED_B8R8_G8R8:
-		case ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN) & CELL_GCM_TEXTURE_COMPRESSED_R8B8_R8G8:
 		default:
-			LOG_ERROR(RSX, "Unimplemented Texture format : %x", format);
+			LOG_ERROR(RSX, "Unimplemented mapping for texture format: 0x%x", format);
 			break;
+		
+		case CELL_GCM_TEXTURE_COMPRESSED_HILO8:
+		case CELL_GCM_TEXTURE_COMPRESSED_DXT1:
+		case CELL_GCM_TEXTURE_COMPRESSED_DXT23:
+		case CELL_GCM_TEXTURE_COMPRESSED_DXT45:
+		case CELL_GCM_TEXTURE_DEPTH24_D8:
+		case CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT:
+		case CELL_GCM_TEXTURE_DEPTH16:
+		case CELL_GCM_TEXTURE_DEPTH16_FLOAT:
+		case CELL_GCM_TEXTURE_X32_FLOAT:
+		case CELL_GCM_TEXTURE_W16_Z16_Y16_X16_FLOAT:
+		case CELL_GCM_TEXTURE_W32_Z32_Y32_X32_FLOAT:
+		case CELL_GCM_TEXTURE_R5G5B5A1:
+		case CELL_GCM_TEXTURE_D1R5G5B5:
+		case CELL_GCM_TEXTURE_A1R5G5B5:
+		case CELL_GCM_TEXTURE_A4R4G4B4:
+		case CELL_GCM_TEXTURE_R5G6B5:
+		case CELL_GCM_TEXTURE_COMPRESSED_B8R8_G8R8:
+		case CELL_GCM_TEXTURE_COMPRESSED_R8B8_R8G8:
+			shared_resource_view_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			break;
+
 		case CELL_GCM_TEXTURE_B8:
-			srvDesc.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+			shared_resource_view_desc.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
 				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
 				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
 				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
 				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0);
 			break;
-		case CELL_GCM_TEXTURE_A1R5G5B5:
-		case CELL_GCM_TEXTURE_A4R4G4B4:
-		case CELL_GCM_TEXTURE_R5G6B5:
-			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+		case CELL_GCM_TEXTURE_G8B8:
+		{
+			u8 remap_a = rsx::method_registers.fragment_textures[i].remap() & 0x3;
+			u8 remap_r = (rsx::method_registers.fragment_textures[i].remap() >> 2) & 0x3;
+			u8 remap_g = (rsx::method_registers.fragment_textures[i].remap() >> 4) & 0x3;
+			u8 remap_b = (rsx::method_registers.fragment_textures[i].remap() >> 6) & 0x3;
+
+			if (is_render_target)
+			{
+				// ARGB format
+				// Data comes from RTT, stored as RGBA already
+				const int RemapValue[4] =
+				{
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1,
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2,
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1,
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2
+				};
+
+				channel_mapping = { RemapValue[remap_r], RemapValue[remap_g], RemapValue[remap_b], RemapValue[remap_a] };
+				requires_remap = true;
+			}
+			else
+			{
+				// ARGB format
+				// Data comes from RSX mem, stored as ARGB already
+				const int RemapValue[4] =
+				{
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2,
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1,
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2,
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1
+				};
+
+				channel_mapping = { RemapValue[remap_r], RemapValue[remap_g], RemapValue[remap_b], RemapValue[remap_a] };
+				requires_remap = true;
+			}
+
 			break;
+		}
+
+		case CELL_GCM_TEXTURE_R6G5B5: // TODO: Remap it to another format here, so it's not glitched out
+			shared_resource_view_desc.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1,
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2,
+				D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0);
+			break;
+
+		case CELL_GCM_TEXTURE_X16:
+			shared_resource_view_desc.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+				D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1,
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+				D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1,
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0);
+			break;
+
+		case CELL_GCM_TEXTURE_Y16_X16:
+		case CELL_GCM_TEXTURE_COMPRESSED_HILO_S8:
+			shared_resource_view_desc.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1,
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1,
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0);
+			break;
+
+		case CELL_GCM_TEXTURE_Y16_X16_FLOAT:
+			shared_resource_view_desc.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1,
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1);
+			break;
+
+		case ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN) & CELL_GCM_TEXTURE_COMPRESSED_B8R8_G8R8:
+		case ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN) & CELL_GCM_TEXTURE_COMPRESSED_R8B8_R8G8:
+			shared_resource_view_desc.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1,
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2,
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+				D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0);
+			break;
+				
+		case CELL_GCM_TEXTURE_D8R8G8B8:	
+			shared_resource_view_desc.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1,
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3,
+				D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1);
+			break;
+			
 		case CELL_GCM_TEXTURE_A8R8G8B8:
 		{
-			const int RemapValue[4] =
-			{
-				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1,
-				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2,
-				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3,
-				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0
-			};
+			u8 remap_a = rsx::method_registers.fragment_textures[i].remap() & 0x3;
+			u8 remap_r = (rsx::method_registers.fragment_textures[i].remap() >> 2) & 0x3;
+			u8 remap_g = (rsx::method_registers.fragment_textures[i].remap() >> 4) & 0x3;
+			u8 remap_b = (rsx::method_registers.fragment_textures[i].remap() >> 6) & 0x3;
 
-			u8 remap_a = m_textures[i].GetRemap() & 0x3;
-			u8 remap_r = (m_textures[i].GetRemap() >> 2) & 0x3;
-			u8 remap_g = (m_textures[i].GetRemap() >> 4) & 0x3;
-			u8 remap_b = (m_textures[i].GetRemap() >> 6) & 0x3;
-			if (isRenderTarget)
-				srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			if (is_render_target)
+			{
+				// ARGB format
+				// Data comes from RTT, stored as RGBA already
+				const int RemapValue[4] =
+				{
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3,
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1,
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2
+				};
+
+				channel_mapping = { RemapValue[remap_r], RemapValue[remap_g], RemapValue[remap_b], RemapValue[remap_a] };
+				requires_remap = true;
+			}
+			else if (is_depth_stencil_texture)
+			{
+				shared_resource_view_desc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+				shared_resource_view_desc.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0);
+			}
 			else
-				srvDesc.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
-					RemapValue[remap_a],
-					RemapValue[remap_r],
-					RemapValue[remap_g],
-					RemapValue[remap_b]);
-
-			break;
-		}
-		case CELL_GCM_TEXTURE_COMPRESSED_DXT1:
-		case CELL_GCM_TEXTURE_COMPRESSED_DXT23:
-		case CELL_GCM_TEXTURE_COMPRESSED_DXT45:
-		case CELL_GCM_TEXTURE_G8B8:
-		case CELL_GCM_TEXTURE_R6G5B5:
-		case CELL_GCM_TEXTURE_DEPTH24_D8:
-		case CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT:
-		case CELL_GCM_TEXTURE_DEPTH16:
-		case CELL_GCM_TEXTURE_DEPTH16_FLOAT:
-		case CELL_GCM_TEXTURE_X16:
-		case CELL_GCM_TEXTURE_Y16_X16:
-		case CELL_GCM_TEXTURE_R5G5B5A1:
-		case CELL_GCM_TEXTURE_W16_Z16_Y16_X16_FLOAT:
-		case CELL_GCM_TEXTURE_W32_Z32_Y32_X32_FLOAT:
-		case CELL_GCM_TEXTURE_X32_FLOAT:
-		case CELL_GCM_TEXTURE_D1R5G5B5:
-			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-			break;
-		case CELL_GCM_TEXTURE_D8R8G8B8:
-		{
-			const int RemapValue[4] =
 			{
-				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1,
-				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2,
-				D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3,
-				D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1
-			};
+				// ARGB format
+				// Data comes from RSX mem, stored as ARGB already
+				const int RemapValue[4] =
+				{
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0,
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1,
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2,
+					D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3
+				};
 
-			u8 remap_a = m_textures[i].GetRemap() & 0x3;
-			u8 remap_r = (m_textures[i].GetRemap() >> 2) & 0x3;
-			u8 remap_g = (m_textures[i].GetRemap() >> 4) & 0x3;
-			u8 remap_b = (m_textures[i].GetRemap() >> 6) & 0x3;
+				channel_mapping = { RemapValue[remap_r], RemapValue[remap_g], RemapValue[remap_b], RemapValue[remap_a] };
+				requires_remap = true;
+			}
 
-			srvDesc.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
-				RemapValue[remap_a],
-				RemapValue[remap_r],
-				RemapValue[remap_g],
-				RemapValue[remap_b]);
 			break;
 		}
-		case CELL_GCM_TEXTURE_Y16_X16_FLOAT:
-			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-			break;
-		case CELL_GCM_TEXTURE_COMPRESSED_B8R8_G8R8:
-			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-			break;
-		case CELL_GCM_TEXTURE_COMPRESSED_R8B8_R8G8:
-			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-			break;
 		}
 
-		D3D12_CPU_DESCRIPTOR_HANDLE Handle = getCurrentResourceStorage().m_textureDescriptorsHeap->GetCPUDescriptorHandleForHeapStart();
-		Handle.ptr += (getCurrentResourceStorage().m_currentTextureIndex + usedTexture) * m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-		m_device->CreateShaderResourceView(vramTexture, &srvDesc, Handle);
-
-		if (getCurrentResourceStorage().m_currentSamplerIndex + 16 > 2048)
+		if (requires_remap)
 		{
-			getCurrentResourceStorage().m_samplerDescriptorHeapIndex = 1;
-			getCurrentResourceStorage().m_currentSamplerIndex = 0;
+			auto decoded_remap = rsx::method_registers.fragment_textures[i].decoded_remap();
+			u8 remapped_inputs[] = { decoded_remap.second[1], decoded_remap.second[2], decoded_remap.second[3], decoded_remap.second[0] };
+
+			for (u8 channel = 0; channel < 4; channel++)
+			{
+				switch (remapped_inputs[channel])
+				{
+				default:
+				case CELL_GCM_TEXTURE_REMAP_REMAP:
+					break;
+				case CELL_GCM_TEXTURE_REMAP_ONE:
+					channel_mapping[channel] = D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1;
+					break;
+				case CELL_GCM_TEXTURE_REMAP_ZERO:
+					channel_mapping[channel] = D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0;
+				}
+			}
+
+			shared_resource_view_desc.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+				channel_mapping[0],
+				channel_mapping[1],
+				channel_mapping[2],
+				channel_mapping[3]);
 		}
 
-		Handle = getCurrentResourceStorage().m_samplerDescriptorHeap[getCurrentResourceStorage().m_samplerDescriptorHeapIndex]->GetCPUDescriptorHandleForHeapStart();
-		Handle.ptr += (getCurrentResourceStorage().m_currentSamplerIndex + usedTexture) * m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-		m_device->CreateSampler(&getSamplerDesc(m_textures[i]), Handle);
+		m_device->CreateShaderResourceView(vram_texture, &shared_resource_view_desc,
+			CD3DX12_CPU_DESCRIPTOR_HANDLE(m_current_texture_descriptors->GetCPUDescriptorHandleForHeapStart())
+			.Offset((UINT)i, m_descriptor_stride_srv_cbv_uav)
+			);
 
-		usedTexture++;
+		m_device->CreateSampler(&get_sampler_desc(rsx::method_registers.fragment_textures[i]),
+			CD3DX12_CPU_DESCRIPTOR_HANDLE(m_current_sampler_descriptors->GetCPUDescriptorHandleForHeapStart())
+			.Offset((UINT)i, m_descriptor_stride_samplers));
 	}
-
-	return usedTexture;
 }
-
 #endif

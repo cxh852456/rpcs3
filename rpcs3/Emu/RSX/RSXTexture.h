@@ -1,122 +1,161 @@
 #pragma once
+#include "GCM.h"
 
-class RSXTexture
+namespace rsx
 {
-protected:
-	u8 m_index;
+	/**
+	* Use an extra cubemap format
+	*/
+	enum class texture_dimension_extended : u8
+	{
+		texture_dimension_1d = 0,
+		texture_dimension_2d = 1,
+		texture_dimension_cubemap = 2,
+		texture_dimension_3d = 3,
+	};
 
-public:
-	u32 m_pitch;
-	u16 m_depth;
+	class fragment_texture
+	{
+	protected:
+		const u8 m_index;
+		std::array<u32, 0x10000 / 4> &registers;
 
-public:
-	RSXTexture();
-	RSXTexture(u8 index);
-	virtual void Init();
+	public:
+		fragment_texture(u8 idx, std::array<u32, 0x10000 / 4> &r) : m_index(idx), registers(r) { }
+		fragment_texture() = delete;
 
-	// Offset
-	virtual u32 GetOffset() const;
+		//initialize texture registers with default values
+		void init();
 
-	// Format
-	virtual u8   GetLocation() const;
-	virtual bool isCubemap() const;
-	virtual u8   GetBorderType() const;
-	virtual u8   GetDimension() const;
-	virtual u8   GetFormat() const;
-	virtual u16  GetMipmap() const;
+		// Offset
+		u32 offset() const;
 
-	// Address
-	virtual u8 GetWrapS() const;
-	virtual u8 GetWrapT() const;
-	virtual u8 GetWrapR() const;
-	virtual u8 GetUnsignedRemap() const;
-	virtual u8 GetZfunc() const;
-	virtual u8 GetGamma() const;
-	virtual u8 GetAnisoBias() const;
-	virtual u8 GetSignedRemap() const;
+		// Format
+		u8   location() const;
+		bool cubemap() const;
+		u8   border_type() const;
+		rsx::texture_dimension   dimension() const;
+		/**
+		 * 2d texture can be either plane or cubemap texture depending on cubemap bit.
+		 * Since cubemap is a format per se in all gfx API this function directly returns
+		 * cubemap as a separate dimension.
+		 */
+		rsx::texture_dimension_extended get_extended_texture_dimension() const;
+		u8   format() const;
+		bool is_compressed_format() const;
+		u16  mipmap() const;
+		/**
+		 * mipmap() returns value from register which can be higher than the actual number of mipmap level.
+		 * This function clamp the result with the mipmap count allowed by texture size.
+		 */
+		u16 get_exact_mipmap_count() const;
 
-	// Control0
-	virtual bool IsEnabled() const;
-	virtual u16  GetMinLOD() const;
-	virtual u16  GetMaxLOD() const;
-	virtual u8   GetMaxAniso() const;
-	virtual bool IsAlphaKillEnabled() const;
+		// Address
+		rsx::texture_wrap_mode wrap_s() const;
+		rsx::texture_wrap_mode wrap_t() const;
+		rsx::texture_wrap_mode wrap_r() const;
+		u8 unsigned_remap() const;
+		u8 zfunc() const;
+		u8 gamma() const;
+		u8 aniso_bias() const;
+		u8 signed_remap() const;
 
-	// Control1
-	virtual u32 GetRemap() const;
+		// Control0
+		bool enabled() const;
+		u16  min_lod() const;
+		u16  max_lod() const;
+		rsx::texture_max_anisotropy   max_aniso() const;
+		bool alpha_kill_enabled() const;
 
-	// Filter
-	virtual u16 GetBias() const;
-	virtual u8  GetMinFilter() const;
-	virtual u8  GetMagFilter() const;
-	virtual u8  GetConvolutionFilter() const;
-	virtual bool isASigned() const;
-	virtual bool isRSigned() const;
-	virtual bool isGSigned() const;
-	virtual bool isBSigned() const;
+		// Control1
+		u32 remap() const;
 
-	// Image Rect
-	virtual u16 GetWidth() const;
-	virtual u16 GetHeight() const;
+		/**
+		 * returns a pair of arrays
+		 * First array is a redirection table into the channel indices
+		 * Second array is a lookup reference deciding whether to use the redirection table or use constants 0 and 1
+		 * Both arrays have components in A-R-G-B format
+		 */
+		std::pair<std::array<u8, 4>, std::array<u8, 4>> decoded_remap() const;
 
-	// Border Color
-	virtual u32 GetBorderColor() const;
+		// Filter
+		float bias() const;
+		rsx::texture_minify_filter  min_filter() const;
+		rsx::texture_magnify_filter  mag_filter() const;
+		u8  convolution_filter() const;
+		bool a_signed() const;
+		bool r_signed() const;
+		bool g_signed() const;
+		bool b_signed() const;
 
-	void SetControl3(u16 depth, u32 pitch);
-};
+		// Image Rect
+		u16 width() const;
+		u16 height() const;
 
-class RSXVertexTexture : public RSXTexture
-{
-public:
-	RSXVertexTexture();
-	RSXVertexTexture(u8 index);
-	void Init();
+		// Border Color
+		u32 border_color() const;
+		u16 depth() const;
+		u32 pitch() const;
+	};
 
-	// Offset
-	u32 GetOffset() const;
+	class vertex_texture
+	{
+	protected:
+		const u8 m_index;
+		std::array<u32, 0x10000 / 4> &registers;
 
-	// Format
-	u8   GetLocation() const;
-	bool isCubemap() const;
-	u8   GetBorderType() const;
-	u8   GetDimension() const;
-	u8   GetFormat() const;
-	u16  GetMipmap() const;
+	public:
+		vertex_texture(u8 idx, std::array<u32, 0x10000 / 4> &r) : m_index(idx), registers(r) { }
+		vertex_texture() = delete;
 
-	// Address
-	u8 GetWrapS() const;
-	u8 GetWrapT() const;
-	u8 GetWrapR() const;
-	u8 GetUnsignedRemap() const;
-	u8 GetZfunc() const;
-	u8 GetGamma() const;
-	u8 GetAnisoBias() const;
-	u8 GetSignedRemap() const;
+		//initialize texture registers with default values
+		void init();
 
-	// Control0
-	bool IsEnabled() const;
-	u16  GetMinLOD() const;
-	u16  GetMaxLOD() const;
-	u8   GetMaxAniso() const;
-	bool IsAlphaKillEnabled() const;
+		// Offset
+		u32 offset() const;
 
-	// Control1
-	u32 GetRemap() const;
+		// Format
+		u8 location() const;
+		bool cubemap() const;
+		u8 border_type() const;
+		rsx::texture_dimension dimension() const;
+		u8 format() const;
+		u16 mipmap() const;
 
-	// Filter
-	u16 GetBias() const;
-	u8  GetMinFilter() const;
-	u8  GetMagFilter() const;
-	u8  GetConvolutionFilter() const;
-	bool isASigned() const;
-	bool isRSigned() const;
-	bool isGSigned() const;
-	bool isBSigned() const;
+		// Address
+		u8 unsigned_remap() const;
+		u8 zfunc() const;
+		u8 gamma() const;
+		u8 aniso_bias() const;
+		u8 signed_remap() const;
 
-	// Image Rect
-	u16 GetWidth() const;
-	u16 GetHeight() const;
+		// Control0
+		bool enabled() const;
+		u16 min_lod() const;
+		u16 max_lod() const;
+		rsx::texture_max_anisotropy max_aniso() const;
+		bool alpha_kill_enabled() const;
 
-	// Border Color
-	u32 GetBorderColor() const;
-};
+		// Filter
+		u16 bias() const;
+		rsx::texture_minify_filter min_filter() const;
+		rsx::texture_magnify_filter mag_filter() const;
+		u8 convolution_filter() const;
+		bool a_signed() const;
+		bool r_signed() const;
+		bool g_signed() const;
+		bool b_signed() const;
+
+		// Image Rect
+		u16 width() const;
+		u16 height() const;
+
+		// Border Color
+		u32 border_color() const;
+		u16 depth() const;
+		u32 pitch() const;
+
+		rsx::texture_dimension_extended get_extended_texture_dimension() const;
+		u16 get_exact_mipmap_count() const;
+	};
+}

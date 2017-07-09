@@ -6,7 +6,7 @@
 #ifdef _WIN32
 #include <Windows.h>
 #include "GL/gl.h"
-#include "GL/glext.h"
+#include <glext.h>
 typedef BOOL (WINAPI* PFNWGLSWAPINTERVALEXTPROC) (int interval);
 
 #define OPENGL_PROC(p, n) extern p gl##n
@@ -25,7 +25,16 @@ typedef BOOL (WINAPI* PFNWGLSWAPINTERVALEXTPROC) (int interval);
 #include <GL/glxext.h>
 #endif
 
-void InitProcTable();
+#ifndef GL_TEXTURE_BUFFER_BINDING
+//During spec release, this enum was removed during upgrade from ARB equivalent
+//See https://www.khronos.org/bugzilla/show_bug.cgi?id=844
+#define GL_TEXTURE_BUFFER_BINDING 0x8C2A
+#endif
+
+namespace gl
+{
+	void init();
+}
 
 struct OpenGL
 {

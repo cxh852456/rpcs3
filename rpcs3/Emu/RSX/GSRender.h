@@ -1,34 +1,64 @@
 #pragma once
-#include "Emu/RSX/RSXThread.h"
 
-struct GSRender : public RSXThread
+#include "Emu/RSX/RSXThread.h"
+#include <memory>
+
+struct RSXDebuggerProgram
 {
-	virtual ~GSRender() override
+	u32 id;
+	u32 vp_id;
+	u32 fp_id;
+	std::string vp_shader;
+	std::string fp_shader;
+	bool modified;
+
+	RSXDebuggerProgram()
+		: modified(false)
 	{
 	}
-
-	virtual void Close()=0;
 };
 
-enum GSLockType
+using RSXDebuggerPrograms = std::vector<RSXDebuggerProgram>;
+
+using draw_context_t = std::shared_ptr<void>;
+
+class GSFrameBase
 {
-	GS_LOCK_NOT_WAIT,
-	GS_LOCK_WAIT_FLIP,
+public:
+	GSFrameBase() = default;
+	GSFrameBase(const GSFrameBase&) = delete;
+
+	virtual void close() = 0;
+	virtual bool shown() = 0;
+	virtual void hide() = 0;
+	virtual void show() = 0;
+
+	draw_context_t new_context();
+
+	virtual void set_current(draw_context_t ctx) = 0;
+	virtual void flip(draw_context_t ctx, bool skip_frame=false) = 0;
+	virtual int client_width() = 0;
+	virtual int client_height() = 0;
+
+	virtual void* handle() const = 0;
+
+protected:
+	virtual void delete_context(void* ctx) = 0;
+	virtual void* make_context() = 0;
 };
 
-struct GSLock
+class GSRender : public rsx::thread
 {
-private:
-	GSRender& m_renderer;
-	GSLockType m_type;
+protected:
+	GSFrameBase* m_frame;
+	draw_context_t m_context;
 
 public:
-	GSLock(GSRender& renderer, GSLockType type);
+	GSRender();
+	virtual ~GSRender();
 
-	~GSLock();
-};
+	void on_init_rsx() override;
+	void on_init_thread() override;
 
-struct GSLockCurrent : GSLock
-{
-	GSLockCurrent(GSLockType type);
+	void flip(int buffer) override;
 };

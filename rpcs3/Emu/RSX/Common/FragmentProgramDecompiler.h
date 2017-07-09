@@ -19,8 +19,12 @@
  */
 class FragmentProgramDecompiler
 {
+	OPDEST dst;
+	SRC0 src0;
+	SRC1 src1;
+	SRC2 src2;
+
 	std::string main;
-	u32 m_addr;
 	u32& m_size;
 	u32 m_const_index;
 	u32 m_offset;
@@ -40,16 +44,60 @@ class FragmentProgramDecompiler
 	std::string AddCond();
 	std::string AddConst();
 	std::string AddTex();
+	void AddFlowOp(std::string code);
 	std::string Format(const std::string& code);
 
+	//Technically a temporary workaround until we know what type3 is
+	std::string AddType3();
+
+	//Prevent division by zero by catching denormals
+	//Simpler variant where input and output are expected to be positive
+	std::string NotZero(const std::string& code);
+	std::string NotZeroPositive(const std::string& code);
+	
+	//Prevents operations from overflowing the max range (tested with fp_dynamic3 autotest sample)
+	std::string NoOverflow(const std::string& code);
+
+	/**
+	* Returns true if the dst set is not a vector (i.e only a single component)
+	*/
+	bool DstExpectsSca();
+
 	void AddCodeCond(const std::string& dst, const std::string& src);
+	std::string GetRawCond();
 	std::string GetCond();
 	template<typename T> std::string GetSRC(T src);
 	std::string BuildCode();
 
 	u32 GetData(const u32 d) const { return d << 16 | d >> 16; }
+
+	/**
+	 * Emits code if opcode is an SCT one and returns true,
+	 * otherwise do nothing and return false.
+	 * NOTE: What does SCT means ???
+	 */
+	bool handle_sct(u32 opcode);
+
+	/**
+	* Emits code if opcode is an SCB one and returns true,
+	* otherwise do nothing and return false.
+	* NOTE: What does SCB means ???
+	*/
+	bool handle_scb(u32 opcode);
+
+	/**
+	* Emits code if opcode is an TEX SRB one and returns true,
+	* otherwise do nothing and return false.
+	* NOTE: What does TEX SRB means ???
+	*/
+	bool handle_tex_srb(u32 opcode);
 protected:
-	u32 m_ctrl;
+	const RSXFragmentProgram &m_prog;
+	u32 m_ctrl = 0;
+	
+	u32 m_2d_sampled_textures = 0;        //Mask of textures sampled as texture2D (conflicts with samplerShadow fetch)
+	u32 m_shadow_sampled_textures = 0;    //Mask of textures sampled as boolean shadow comparisons
+	
 	/** returns the type name of float vectors.
 	 */
 	virtual std::string getFloatTypeName(size_t elementCount) = 0;
@@ -62,7 +110,7 @@ protected:
 	/** returns string calling saturate function.
 	*/
 	virtual std::string saturate(const std::string &code) = 0;
-	/** returns string calling comparaison function on 2 args passed as strings.
+	/** returns string calling comparison function on 2 args passed as strings.
 	 */
 	virtual std::string compareFunction(COMPARE, const std::string &, const std::string &) = 0;
 
@@ -86,7 +134,8 @@ protected:
 	virtual void insertMainEnd(std::stringstream &OS) = 0;
 public:
 	ParamArray m_parr;
-	FragmentProgramDecompiler() = delete;
-	FragmentProgramDecompiler(u32 addr, u32& size, u32 ctrl);
+	FragmentProgramDecompiler(const RSXFragmentProgram &prog, u32& size);
+	FragmentProgramDecompiler(const FragmentProgramDecompiler&) = delete;
+	FragmentProgramDecompiler(FragmentProgramDecompiler&&) = delete;
 	std::string Decompile();
 };

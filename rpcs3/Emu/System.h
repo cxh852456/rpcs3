@@ -1,109 +1,213 @@
 #pragma once
 
-#include "Loader/Loader.h"
+#include "VFS.h"
+#include "Utilities/Atomic.h"
+#include "Utilities/Config.h"
+#include <functional>
+#include <memory>
+#include <string>
 
-enum Status : u32
+enum class system_type
 {
-	Running,
-	Paused,
-	Stopped,
-	Ready,
+	ps3,
+	psv, // Experimental
+	//psp, // Hypothetical
 };
 
-// Emulation Stopped exception event
-class EmulationStopped {};
-
-class CPUThreadManager;
-class PadManager;
-class KeyboardManager;
-class MouseManager;
-class GSManager;
-class AudioManager;
-class CallbackManager;
-class CPUThread;
-class EventManager;
-class ModuleManager;
-struct VFS;
-
-struct EmuInfo
+enum class system_state
 {
-private:
-	friend class Emulator;
-
-	u32 m_tls_addr = 0;
-	u32 m_tls_filesz = 0;
-	u32 m_tls_memsz = 0;
-	u32 m_sdk_version = 0x360001;
-	u32 m_malloc_pagesize = 0x100000;
-	u32 m_primary_stacksize = 0x100000;
-	s32 m_primary_prio = 0x50;
-
-public:
-	EmuInfo()
-	{
-	}
+	running,
+	paused,
+	stopped,
+	ready,
 };
 
-class Emulator
+enum class ppu_decoder_type
 {
-	enum Mode
-	{
-		DisAsm,
-		InterpreterDisAsm,
-		Interpreter,
-	};
-		
-	volatile u32 m_status;
-	uint m_mode;
+	precise,
+	fast,
+	llvm,
+};
 
-	std::atomic<u64> m_pause_start_time; // set when paused
-	std::atomic<u64> m_pause_amend_time; // increased when resumed
+enum class spu_decoder_type
+{
+	precise,
+	fast,
+	asmjit,
+	llvm,
+};
 
-	u32 m_rsx_callback;
-	u32 m_cpu_thr_stop;
+enum class lib_loading_type
+{
+	automatic,
+	manual,
+	both,
+	liblv2only
+};
 
-	std::vector<u64> m_break_points;
-	std::vector<u64> m_marked_points;
+enum class keyboard_handler
+{
+	null,
+	basic,
+};
 
-	std::mutex m_core_mutex;
+enum class mouse_handler
+{
+	null,
+	basic,
+};
 
-	std::unique_ptr<CPUThreadManager> m_thread_manager;
-	std::unique_ptr<PadManager>       m_pad_manager;
-	std::unique_ptr<KeyboardManager>  m_keyboard_manager;
-	std::unique_ptr<MouseManager>     m_mouse_manager;
-	std::unique_ptr<GSManager>        m_gs_manager;
-	std::unique_ptr<AudioManager>     m_audio_manager;
-	std::unique_ptr<CallbackManager>  m_callback_manager;
-	std::unique_ptr<EventManager>     m_event_manager;
-	std::unique_ptr<ModuleManager>    m_module_manager;
-	std::unique_ptr<VFS>              m_vfs;
+enum class pad_handler
+{
+	null,
+	keyboard,
+	ds4,
+#ifdef _MSC_VER
+	xinput,
+#endif
+#ifdef _WIN32
+	mm,
+#endif
+};
 
-	EmuInfo m_info;
-	loader::loader m_loader;
+enum class video_renderer
+{
+	null,
+	opengl,
+	vulkan,
+#ifdef _MSC_VER
+	dx12,
+#endif
+};
 
-public:
+enum class audio_renderer
+{
+	null,
+#ifdef _WIN32
+	xaudio,
+#elif __linux__
+	alsa,
+#endif
+	openal,
+};
+
+enum class camera_handler
+{
+	null,
+	fake,
+};
+
+enum class fake_camera_type
+{
+	unknown,
+	eyetoy,
+	eyetoy2,
+	uvc1_1,
+};
+
+enum class video_resolution
+{
+	_1080,
+	_720,
+	_480,
+	_576,
+	_1600x1080,
+	_1440x1080,
+	_1280x1080,
+	_960x1080,
+};
+
+enum class video_aspect
+{
+	_auto,
+	_4_3,
+	_16_9,
+};
+
+enum class frame_limit_type
+{
+	none,
+	_59_94,
+	_50,
+	_60,
+	_30,
+	_auto,
+};
+
+enum CellNetCtlState : s32;
+enum CellSysutilLang : s32;
+
+// Current process type
+extern system_type g_system;
+
+struct EmuCallbacks
+{
+	std::function<void(std::function<void()>)> call_after;
+	std::function<void()> process_events;
+	std::function<void()> on_run;
+	std::function<void()> on_pause;
+	std::function<void()> on_resume;
+	std::function<void()> on_stop;
+	std::function<void()> on_ready;
+	std::function<void()> exit;
+	std::function<std::shared_ptr<class KeyboardHandlerBase>()> get_kb_handler;
+	std::function<std::shared_ptr<class MouseHandlerBase>()> get_mouse_handler;
+	std::function<std::shared_ptr<class PadHandlerBase>()> get_pad_handler;
+	std::function<std::unique_ptr<class GSFrameBase>()> get_gs_frame;
+	std::function<std::shared_ptr<class GSRender>()> get_gs_render;
+	std::function<std::shared_ptr<class AudioThread>()> get_audio;
+	std::function<std::shared_ptr<class MsgDialogBase>()> get_msg_dialog;
+	std::function<std::unique_ptr<class SaveDialogBase>()> get_save_dialog;
+};
+
+class Emulator final
+{
+	atomic_t<system_state> m_state{system_state::stopped};
+
+	EmuCallbacks m_cb;
+
+	atomic_t<u64> m_pause_start_time; // set when paused
+	atomic_t<u64> m_pause_amend_time; // increased when resumed
+
 	std::string m_path;
 	std::string m_elf_path;
-	std::string m_emu_path;
+	std::string m_cache_path;
 	std::string m_title_id;
 	std::string m_title;
 
-	Emulator();
-	~Emulator();
+public:
+	Emulator() = default;
 
-	void Init();
-	void SetPath(const std::string& path, const std::string& elf_path = "");
-	void SetTitleID(const std::string& id);
-	void SetTitle(const std::string& title);
-
-	std::string GetPath() const
+	void SetCallbacks(EmuCallbacks&& cb)
 	{
-		return m_elf_path;
+		m_cb = std::move(cb);
 	}
 
-	std::string GetEmulatorPath() const
+	const auto& GetCallbacks() const
 	{
-		return m_emu_path;
+		return m_cb;
+	}
+
+	// Call from the GUI thread
+	void CallAfter(std::function<void()>&& func) const
+	{
+		return m_cb.call_after(std::move(func));
+	}
+
+	/** Set emulator mode to running unconditionnaly.
+	 * Required to execute various part (PPUInterpreter, memory manager...) outside of rpcs3.
+	 */
+	void SetTestMode()
+	{
+		m_state = system_state::running;
+	}
+
+	void Init();
+	void SetPath(const std::string& path, const std::string& elf_path = {});
+
+	const std::string& GetPath() const
+	{
+		return m_elf_path;
 	}
 
 	const std::string& GetTitleID() const
@@ -116,9 +220,9 @@ public:
 		return m_title;
 	}
 
-	void SetEmulatorPath(const std::string& path)
+	const std::string& GetCachePath() const
 	{
-		m_emu_path = path;
+		return m_cache_path;
 	}
 
 	u64 GetPauseTime()
@@ -126,95 +230,170 @@ public:
 		return m_pause_amend_time;
 	}
 
-	std::mutex&       GetCoreMutex()       { return m_core_mutex; }
-	CPUThreadManager& GetCPU()             { return *m_thread_manager; }
-	PadManager&       GetPadManager()      { return *m_pad_manager; }
-	KeyboardManager&  GetKeyboardManager() { return *m_keyboard_manager; }
-	MouseManager&     GetMouseManager()    { return *m_mouse_manager; }
-	GSManager&        GetGSManager()       { return *m_gs_manager; }
-	AudioManager&     GetAudioManager()    { return *m_audio_manager; }
-	CallbackManager&  GetCallbackManager() { return *m_callback_manager; }
-	VFS&              GetVFS()             { return *m_vfs; }
-	std::vector<u64>& GetBreakPoints()     { return m_break_points; }
-	std::vector<u64>& GetMarkedPoints()    { return m_marked_points; }
-	EventManager&     GetEventManager()    { return *m_event_manager; }
-	ModuleManager&    GetModuleManager()   { return *m_module_manager; }
-
-	void ResetInfo()
-	{
-		m_info = {};
-	}
-
-	void SetTLSData(u32 addr, u32 filesz, u32 memsz)
-	{
-		m_info.m_tls_addr = addr;
-		m_info.m_tls_filesz = filesz;
-		m_info.m_tls_memsz = memsz;
-	}
-
-	void SetParams(u32 sdk_ver, u32 malloc_pagesz, u32 stacksz, s32 prio)
-	{
-		m_info.m_sdk_version = sdk_ver;
-		m_info.m_malloc_pagesize = malloc_pagesz;
-		m_info.m_primary_stacksize = stacksz;
-		m_info.m_primary_prio = prio;
-	}
-
-	void SetRSXCallback(u32 addr)
-	{
-		m_rsx_callback = addr;
-	}
-
-	void SetCPUThreadStop(u32 addr)
-	{
-		m_cpu_thr_stop = addr;
-	}
-
-	u32 GetTLSAddr() const { return m_info.m_tls_addr; }
-	u32 GetTLSFilesz() const { return m_info.m_tls_filesz; }
-	u32 GetTLSMemsz() const { return m_info.m_tls_memsz; }
-
-	u32 GetMallocPageSize() { return m_info.m_malloc_pagesize; }
-	u32 GetSDKVersion() { return m_info.m_sdk_version; }
-	u32 GetPrimaryStackSize() { return m_info.m_primary_stacksize; }
-	s32 GetPrimaryPrio() { return m_info.m_primary_prio; }
-
-	u32 GetRSXCallback() const { return m_rsx_callback; }
-	u32 GetCPUThreadStop() const { return m_cpu_thr_stop; }
-
 	bool BootGame(const std::string& path, bool direct = false);
+
+	static std::string GetGameDir();
+	static std::string GetLibDir();
 
 	void Load();
 	void Run();
-	void Pause();
+	bool Pause();
 	void Resume();
 	void Stop();
 
-	void SavePoints(const std::string& path);
-	bool LoadPoints(const std::string& path);
-
-	force_inline bool IsRunning() const { return m_status == Running; }
-	force_inline bool IsPaused()  const { return m_status == Paused; }
-	force_inline bool IsStopped() const { return m_status == Stopped; }
-	force_inline bool IsReady()   const { return m_status == Ready; }
+	bool IsRunning() const { return m_state == system_state::running; }
+	bool IsPaused()  const { return m_state == system_state::paused; }
+	bool IsStopped() const { return m_state == system_state::stopped; }
+	bool IsReady()   const { return m_state == system_state::ready; }
+	auto GetStatus() const { return m_state.load(); }
 };
 
 extern Emulator Emu;
 
-using lv2_lock_t = std::unique_lock<std::mutex>;
-
-inline bool check_lv2_lock(lv2_lock_t& lv2_lock)
+struct cfg_root : cfg::node
 {
-	return lv2_lock.owns_lock() && lv2_lock.mutex() == &Emu.GetCoreMutex();
-}
+	struct node_core : cfg::node
+	{
+		node_core(cfg::node* _this) : cfg::node(_this, "Core") {}
 
-#define LV2_LOCK lv2_lock_t lv2_lock(Emu.GetCoreMutex())
-#define LV2_DEFER_LOCK lv2_lock_t lv2_lock
-#define CHECK_LV2_LOCK(x) if (!check_lv2_lock(x)) throw EXCEPTION("lv2_lock is invalid or not locked")
-#define CHECK_EMU_STATUS if (Emu.IsStopped()) throw EmulationStopped{}
+		cfg::_enum<ppu_decoder_type> ppu_decoder{this, "PPU Decoder", ppu_decoder_type::fast};
+		cfg::_int<1, 16> ppu_threads{this, "PPU Threads", 2}; // Amount of PPU threads running simultaneously (must be 2)
+		cfg::_bool ppu_debug{this, "PPU Debug"};
+		cfg::_bool llvm_logs{this, "Save LLVM logs"};
+		cfg::string llvm_cpu{this, "Use LLVM CPU"};
 
-typedef void(*CallAfterCbType)(std::function<void()> func);
+		cfg::_enum<spu_decoder_type> spu_decoder{this, "SPU Decoder", spu_decoder_type::asmjit};
+		cfg::_bool bind_spu_cores{this, "Bind SPU threads to secondary cores"};
+		cfg::_bool lower_spu_priority{this, "Lower SPU thread priority"};
+		cfg::_bool spu_debug{this, "SPU Debug"};
+		cfg::_int<32, 16384> max_spu_immediate_write_size{this, "Maximum immediate DMA write size", 16384}; // Maximum size that an SPU thread can write directly without posting to MFC
 
-void CallAfter(std::function<void()> func);
+		cfg::_enum<lib_loading_type> lib_loading{this, "Lib Loader", lib_loading_type::automatic};
+		cfg::_bool hook_functions{this, "Hook static functions"};
+		cfg::set_entry load_libraries{this, "Load libraries"};
 
-void SetCallAfterCallback(CallAfterCbType cb);
+	} core{this};
+
+	struct node_vfs : cfg::node
+	{
+		node_vfs(cfg::node* _this) : cfg::node(_this, "VFS") {}
+
+		cfg::string emulator_dir{this, "$(EmulatorDir)"}; // Default (empty): taken from fs::get_config_dir()
+		cfg::string dev_hdd0{this, "/dev_hdd0/", "$(EmulatorDir)dev_hdd0/"};
+		cfg::string dev_hdd1{this, "/dev_hdd1/", "$(EmulatorDir)dev_hdd1/"};
+		cfg::string dev_flash{this, "/dev_flash/", "$(EmulatorDir)dev_flash/"};
+		cfg::string dev_usb000{this, "/dev_usb000/", "$(EmulatorDir)dev_usb000/"};
+		cfg::string dev_bdvd{this, "/dev_bdvd/"}; // Not mounted
+		cfg::string app_home{this, "/app_home/"}; // Not mounted
+
+		cfg::_bool host_root{this, "Enable /host_root/"};
+
+	} vfs{this};
+
+	struct node_video : cfg::node
+	{
+		node_video(cfg::node* _this) : cfg::node(_this, "Video") {}
+
+		cfg::_enum<video_renderer> renderer{this, "Renderer", video_renderer::opengl};
+
+		cfg::_enum<video_resolution> resolution{this, "Resolution", video_resolution::_720};
+		cfg::_enum<video_aspect> aspect_ratio{this, "Aspect ratio", video_aspect::_16_9};
+		cfg::_enum<frame_limit_type> frame_limit{this, "Frame limit", frame_limit_type::none};
+
+		cfg::_bool write_color_buffers{this, "Write Color Buffers"};
+		cfg::_bool write_depth_buffer{this, "Write Depth Buffer"};
+		cfg::_bool read_color_buffers{this, "Read Color Buffers"};
+		cfg::_bool read_depth_buffer{this, "Read Depth Buffer"};
+		cfg::_bool log_programs{this, "Log shader programs"};
+		cfg::_bool vsync{this, "VSync"};
+		cfg::_bool debug_output{this, "Debug output"};
+		cfg::_bool overlay{this, "Debug overlay"};
+		cfg::_bool gl_legacy_buffers{this, "Use Legacy OpenGL Buffers"};
+		cfg::_bool use_gpu_texture_scaling{this, "Use GPU texture scaling", true};
+		cfg::_bool stretch_to_display_area{this, "Stretch To Display Area"};
+		cfg::_bool force_high_precision_z_buffer{this, "Force High Precision Z buffer"};
+		cfg::_bool invalidate_surface_cache_every_frame{this, "Invalidate Cache Every Frame", true};
+		cfg::_bool strict_rendering_mode{this, "Strict Rendering Mode"};
+
+		cfg::_bool batch_instanced_geometry{this, "Batch Instanced Geometry", false};
+		cfg::_int<1, 16> vertex_upload_threads{ this, "Vertex Upload Threads", 1 };
+
+		cfg::_bool frame_skip_enabled{this, "Enable Frame Skip"};
+		cfg::_int<1, 8> consequtive_frames_to_draw{this, "Consequtive Frames Drawn", 1};
+		cfg::_int<1, 8> consequtive_frames_to_skip{this, "Consequtive Frames Skept", 1};
+
+		struct node_d3d12 : cfg::node
+		{
+			node_d3d12(cfg::node* _this) : cfg::node(_this, "D3D12") {}
+
+			cfg::string adapter{this, "Adapter"};
+
+		} d3d12{this};
+
+		struct node_vk : cfg::node
+		{
+			node_vk(cfg::node* _this) : cfg::node(_this, "Vulkan") {}
+
+			cfg::string adapter{this, "Adapter"};
+
+		} vk{this};
+
+	} video{this};
+
+	struct node_audio : cfg::node
+	{
+		node_audio(cfg::node* _this) : cfg::node(_this, "Audio") {}
+
+		cfg::_enum<audio_renderer> renderer{this, "Renderer", static_cast<audio_renderer>(1)};
+
+		cfg::_bool dump_to_file{this, "Dump to file"};
+		cfg::_bool convert_to_u16{this, "Convert to 16 bit"};
+		cfg::_bool downmix_to_2ch{this, "Downmix to Stereo", true};
+
+	} audio{this};
+	
+	struct node_io : cfg::node
+	{
+		node_io(cfg::node* _this) : cfg::node(_this, "Input/Output") {}
+
+		cfg::_enum<keyboard_handler> keyboard{this, "Keyboard", keyboard_handler::null};
+		cfg::_enum<mouse_handler> mouse{this, "Mouse", mouse_handler::basic};
+		cfg::_enum<pad_handler> pad{this, "Pad", pad_handler::keyboard};
+		cfg::_enum<camera_handler> camera{this, "Camera", camera_handler::null};
+		cfg::_enum<fake_camera_type> camera_type{this, "Camera type", fake_camera_type::unknown};
+
+	} io{this};
+	
+	struct node_sys : cfg::node
+	{
+		node_sys(cfg::node* _this) : cfg::node(_this, "System") {}
+
+		cfg::_enum<CellSysutilLang> language{this, "Language"};
+
+	} sys{this};
+	
+	struct node_net : cfg::node
+	{
+		node_net(cfg::node* _this) : cfg::node(_this, "Net") {}
+
+		cfg::_enum<CellNetCtlState> net_status{this, "Connection status"};
+		cfg::string ip_address{this, "IP address", "192.168.1.1"};
+
+	} net{this};
+
+	struct node_misc : cfg::node
+	{
+		node_misc(cfg::node* _this) : cfg::node(_this, "Miscellaneous") {}
+		
+		cfg::_bool autostart{this, "Automatically start games after boot", true};
+		cfg::_bool autoexit{this, "Exit RPCS3 when process finishes"};
+		cfg::_bool start_fullscreen{ this, "Start games in fullscreen mode" };
+		cfg::_bool show_fps_in_title{ this, "Show FPS counter in window title", true};
+		cfg::_int<1, 65535> gdb_server_port{this, "Port", 2345};
+
+	} misc{this};
+
+	cfg::log_entry log{this, "Log"};
+};
+
+extern cfg_root g_cfg;

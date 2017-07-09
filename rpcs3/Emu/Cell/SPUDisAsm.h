@@ -66,7 +66,7 @@ static const char* spu_ch_name[128] =
 	"$ch121", "$ch122", "$ch123", "$ch124", "$ch125", "$ch126", "$ch127",
 };
 
-class SPUDisAsm : public PPCDisAsm
+class SPUDisAsm final : public PPCDisAsm
 {
 public:
 	SPUDisAsm(CPUDisAsmMode mode) : PPCDisAsm(mode)
@@ -133,10 +133,14 @@ private:
 	{
 		Write(fmt::format("%s %s,%s,%s,%s", FixOp(op).c_str(), a1, a2, a3, a4));
 	}
+
+public:
+	u32 disasm(u32 pc) override;
+
 	//0 - 10
 	void STOP(spu_opcode_t op)
 	{
-		DisAsm("stop", op.opcode & 0x1fffff);
+		op.rb ? UNK(op) : DisAsm("stop", op.opcode & 0x3fff);
 	}
 	void LNOP(spu_opcode_t op)
 	{
@@ -300,7 +304,7 @@ private:
 	}
 	void STOPD(spu_opcode_t op)
 	{
-		DisAsm("bihnz", spu_reg_name[op.rc], spu_reg_name[op.ra], spu_reg_name[op.rb]);
+		DisAsm("stopd", spu_reg_name[op.rc], spu_reg_name[op.ra], spu_reg_name[op.rb]);
 	}
 	void STQX(spu_opcode_t op)
 	{
@@ -698,73 +702,73 @@ private:
 	//0 - 9
 	void CFLTS(spu_opcode_t op)
 	{
-		DisAsm("cflts", spu_reg_name[op.rt], spu_reg_name[op.ra], op.si8);
+		DisAsm("cflts", spu_reg_name[op.rt], spu_reg_name[op.ra], op.i8);
 	}
 	void CFLTU(spu_opcode_t op)
 	{
-		DisAsm("cfltu", spu_reg_name[op.rt], spu_reg_name[op.ra], op.si8);
+		DisAsm("cfltu", spu_reg_name[op.rt], spu_reg_name[op.ra], op.i8);
 	}
 	void CSFLT(spu_opcode_t op)
 	{
-		DisAsm("csflt", spu_reg_name[op.rt], spu_reg_name[op.ra], op.si8);
+		DisAsm("csflt", spu_reg_name[op.rt], spu_reg_name[op.ra], op.i8);
 	}
 	void CUFLT(spu_opcode_t op)
 	{
-		DisAsm("cuflt", spu_reg_name[op.rt], spu_reg_name[op.ra], op.si8);
+		DisAsm("cuflt", spu_reg_name[op.rt], spu_reg_name[op.ra], op.i8);
 	}
 
 	//0 - 8
 	void BRZ(spu_opcode_t op)
 	{
-		DisAsm("brz", spu_reg_name[op.rt], DisAsmBranchTarget(op.si16));
+		DisAsm("brz", spu_reg_name[op.rt], DisAsmBranchTarget(op.i16));
 	}
 	void STQA(spu_opcode_t op)
 	{
-		DisAsm("stqa", spu_reg_name[op.rt], DisAsmBranchTarget(op.si16));
+		DisAsm("stqa", spu_reg_name[op.rt], DisAsmBranchTarget(op.i16));
 	}
 	void BRNZ(spu_opcode_t op)
 	{
-		DisAsm("brnz", spu_reg_name[op.rt], DisAsmBranchTarget(op.si16));
+		DisAsm("brnz", spu_reg_name[op.rt], DisAsmBranchTarget(op.i16));
 	}
 	void BRHZ(spu_opcode_t op)
 	{
-		DisAsm("brhz", spu_reg_name[op.rt], DisAsmBranchTarget(op.si16));
+		DisAsm("brhz", spu_reg_name[op.rt], DisAsmBranchTarget(op.i16));
 	}
 	void BRHNZ(spu_opcode_t op)
 	{
-		DisAsm("brhnz", spu_reg_name[op.rt], DisAsmBranchTarget(op.si16));
+		DisAsm("brhnz", spu_reg_name[op.rt], DisAsmBranchTarget(op.i16));
 	}
 	void STQR(spu_opcode_t op)
 	{
-		DisAsm("stqr", spu_reg_name[op.rt], DisAsmBranchTarget(op.si16));
+		DisAsm("stqr", spu_reg_name[op.rt], DisAsmBranchTarget(op.i16));
 	}
 	void BRA(spu_opcode_t op)
 	{
-		DisAsm("bra", DisAsmBranchTarget(op.si16));
+		DisAsm("bra", DisAsmBranchTarget(op.i16));
 	}
 	void LQA(spu_opcode_t op)
 	{
-		DisAsm("lqa", spu_reg_name[op.rt], DisAsmBranchTarget(op.si16));
+		DisAsm("lqa", spu_reg_name[op.rt], DisAsmBranchTarget(op.i16));
 	}
 	void BRASL(spu_opcode_t op)
 	{
-		DisAsm("brasl", spu_reg_name[op.rt], DisAsmBranchTarget(op.si16));
+		DisAsm("brasl", spu_reg_name[op.rt], DisAsmBranchTarget(op.i16));
 	}
 	void BR(spu_opcode_t op)
 	{
-		DisAsm("br", DisAsmBranchTarget(op.si16));
+		DisAsm("br", DisAsmBranchTarget(op.i16));
 	}
 	void FSMBI(spu_opcode_t op)
 	{
-		DisAsm("fsmbi", spu_reg_name[op.rt], op.si16);
+		DisAsm("fsmbi", spu_reg_name[op.rt], op.i16);
 	}
 	void BRSL(spu_opcode_t op)
 	{
-		DisAsm("brsl", spu_reg_name[op.rt], DisAsmBranchTarget(op.si16));
+		DisAsm("brsl", spu_reg_name[op.rt], DisAsmBranchTarget(op.i16));
 	}
 	void LQR(spu_opcode_t op)
 	{
-		DisAsm("lqr", spu_reg_name[op.rt], DisAsmBranchTarget(op.si16));
+		DisAsm("lqr", spu_reg_name[op.rt], DisAsmBranchTarget(op.i16));
 	}
 	void IL(spu_opcode_t op)
 	{
@@ -772,15 +776,15 @@ private:
 	}
 	void ILHU(spu_opcode_t op)
 	{
-		DisAsm("ilhu", spu_reg_name[op.rt], op.si16);
+		DisAsm("ilhu", spu_reg_name[op.rt], op.i16);
 	}
 	void ILH(spu_opcode_t op)
 	{
-		DisAsm("ilh", spu_reg_name[op.rt], op.si16);
+		DisAsm("ilh", spu_reg_name[op.rt], op.i16);
 	}
 	void IOHL(spu_opcode_t op)
 	{
-		DisAsm("iohl", spu_reg_name[op.rt], op.si16);
+		DisAsm("iohl", spu_reg_name[op.rt], op.i16);
 	}
 
 	//0 - 7
@@ -904,53 +908,45 @@ private:
 	//0 - 6
 	void HBRA(spu_opcode_t op)
 	{
-		DisAsm("hbra", DisAsmBranchTarget((op.r0h << 7) | op.rt), DisAsmBranchTarget(op.si16));
+		DisAsm("hbra", DisAsmBranchTarget((op.r0h << 7) | op.rt), DisAsmBranchTarget(op.i16));
 	}
 	void HBRR(spu_opcode_t op)
 	{
-		DisAsm("hbrr", DisAsmBranchTarget((op.r0h << 7) | op.rt), DisAsmBranchTarget(op.si16));
+		DisAsm("hbrr", DisAsmBranchTarget((op.r0h << 7) | op.rt), DisAsmBranchTarget(op.i16));
 	}
 	void ILA(spu_opcode_t op)
 	{
 		DisAsm("ila", spu_reg_name[op.rt], op.i18);
 	}
 
-	//0 - 3, rt <> rc
+	//0 - 3
 	void SELB(spu_opcode_t op)
 	{
-		DisAsm("selb", spu_reg_name[op.rc], spu_reg_name[op.ra], spu_reg_name[op.rb], spu_reg_name[op.rt]);
+		DisAsm("selb", spu_reg_name[op.rt4], spu_reg_name[op.ra], spu_reg_name[op.rb], spu_reg_name[op.rc]);
 	}
 	void SHUFB(spu_opcode_t op)
 	{
-		DisAsm("shufb", spu_reg_name[op.rc], spu_reg_name[op.ra], spu_reg_name[op.rb], spu_reg_name[op.rt]);
+		DisAsm("shufb", spu_reg_name[op.rt4], spu_reg_name[op.ra], spu_reg_name[op.rb], spu_reg_name[op.rc]);
 	}
 	void MPYA(spu_opcode_t op)
 	{
-		DisAsm("mpya", spu_reg_name[op.rc], spu_reg_name[op.ra], spu_reg_name[op.rb], spu_reg_name[op.rt]);
+		DisAsm("mpya", spu_reg_name[op.rt4], spu_reg_name[op.ra], spu_reg_name[op.rb], spu_reg_name[op.rc]);
 	}
 	void FNMS(spu_opcode_t op)
 	{
-		DisAsm("fnms", spu_reg_name[op.rc], spu_reg_name[op.ra], spu_reg_name[op.rb], spu_reg_name[op.rt]);
+		DisAsm("fnms", spu_reg_name[op.rt4], spu_reg_name[op.ra], spu_reg_name[op.rb], spu_reg_name[op.rc]);
 	}
 	void FMA(spu_opcode_t op)
 	{
-		DisAsm("fma", spu_reg_name[op.rc], spu_reg_name[op.ra], spu_reg_name[op.rb], spu_reg_name[op.rt]);
+		DisAsm("fma", spu_reg_name[op.rt4], spu_reg_name[op.ra], spu_reg_name[op.rb], spu_reg_name[op.rc]);
 	}
 	void FMS(spu_opcode_t op)
 	{
-		DisAsm("fms", spu_reg_name[op.rc], spu_reg_name[op.ra], spu_reg_name[op.rb], spu_reg_name[op.rt]);
+		DisAsm("fms", spu_reg_name[op.rt4], spu_reg_name[op.ra], spu_reg_name[op.rb], spu_reg_name[op.rc]);
 	}
 
 	void UNK(spu_opcode_t op)
 	{
 		Write(fmt::format("Unknown/Illegal opcode! (0x%08x)", op.opcode));
-	}
-
-	static const spu_opcode_table_t<void(SPUDisAsm::*)(spu_opcode_t)> opcodes;
-
-public:
-	inline void do_disasm(u32 opcode)
-	{
-		(this->*opcodes[opcode])({ opcode });
 	}
 };

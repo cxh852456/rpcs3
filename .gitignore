@@ -32,11 +32,14 @@
 
 /build
 /bin
-/libs
+/lib
+/tmp
 /ipch
 /rpcs3/Debug
 /rpcs3/Release
 /llvm_build
+/Vulkan/Vulkan-build
+/Vulkan/glslang-build
 
 /wxWidgets/lib
 /bin/rpcs3.ini
@@ -51,9 +54,12 @@
 /bin/*.exp
 rpcs3/git-version.h
 
-# Visual Studio Profiler Files
+# Visual Studio Files
+.vs/*
 *.vspx
 *.psess
+*.VC.*
+*.vcxproj.user
 
 # Copyrighted files
 /bin/data/
@@ -70,9 +76,19 @@ rpcs3/git-version.h
 bin/dev_hdd0/*.txt
 x64/*
 rpcs3/x64/*
+rpcs3-tests/x64/*
 
-.DS_Store
-rpcs3/Emu/SysCalls/Modules/prx_*.h
-
-/CMakeFiles/
+# cmake
+Makefile
+*CMakeFiles*
 CMakeCache.txt
+*cmake_install.cmake*
+
+# cotire
+rpcs3/cotire/*
+rpcs3/rpcs3_*_cotire.cmake
+
+# Qt
+moc_*.cpp
+qrc_resources.cpp
+rpcs3_automoc.cpp

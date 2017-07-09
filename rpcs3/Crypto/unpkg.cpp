@@ -1,24 +1,29 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
-#include "Utilities/File.h"
 #include "utils.h"
 #include "aes.h"
 #include "sha1.h"
 #include "key_vault.h"
 #include "unpkg.h"
-#include "restore_new.h"
-#pragma warning(push)
-#pragma message("TODO: remove wx dependency: <wx/progdlg.h>")
-#pragma warning(disable : 4996)
-#include <wx/progdlg.h>
-#pragma warning(pop)
-#include "define_new_memleakdetect.h"
 
-static bool CheckHeader(const fs::file& pkg_f, PKGHeader& header)
+bool pkg_install(const fs::file& pkg_f, const std::string& dir, atomic_t<double>& sync)
 {
-	if (header.pkg_magic != 0x7F504B47)
+	const std::size_t BUF_SIZE = 8192 * 1024; // 8 MB
+
+	// Save current file offset (probably zero)
+	const u64 start_offset = pkg_f.pos();
+
+	// Get basic PKG information
+	PKGHeader header;
+
+	if (!pkg_f.read(header))
 	{
-		LOG_ERROR(LOADER, "PKG: Not a package file!");
+		LOG_ERROR(LOADER, "PKG file is too short!");
+		return false;
+	}
+
+	if (header.pkg_magic != "\x7FPKG"_u32)
+	{
+		LOG_ERROR(LOADER, "Not a PKG file!");
 		return false;
 	}
 
@@ -28,7 +33,7 @@ static bool CheckHeader(const fs::file& pkg_f, PKGHeader& header)
 	case PKG_RELEASE_TYPE_RELEASE: break;
 	default:
 	{
-		LOG_ERROR(LOADER, "PKG: Unknown PKG type (0x%x)", type);
+		LOG_ERROR(LOADER, "Unknown PKG type (0x%x)", type);
 		return false;
 	}
 	}
@@ -39,137 +44,171 @@ static bool CheckHeader(const fs::file& pkg_f, PKGHeader& header)
 	case PKG_PLATFORM_TYPE_PSP: break;
 	default:
 	{
-		LOG_ERROR(LOADER, "PKG: Unknown PKG platform (0x%x)", platform);
+		LOG_ERROR(LOADER, "Unknown PKG platform (0x%x)", platform);
 		return false;
 	}
-	}
-
-	if (header.header_size != PKG_HEADER_SIZE && header.header_size != PKG_HEADER_SIZE2)
-	{
-		LOG_ERROR(LOADER, "PKG: Wrong header size (0x%x)", header.header_size);
-		return false;
 	}
 
 	if (header.pkg_size > pkg_f.size())
 	{
-		LOG_ERROR(LOADER, "PKG: File size mismatch (pkg_size=0x%llx)", header.pkg_size);
+		LOG_ERROR(LOADER, "PKG file size mismatch (pkg_size=0x%llx)", header.pkg_size);
 		return false;
 	}
 
 	if (header.data_size + header.data_offset > header.pkg_size)
 	{
-		LOG_ERROR(LOADER, "PKG: Data size mismatch (data_size=0x%llx, data_offset=0x%llx, file_size=0x%llx)", header.data_size, header.data_offset, header.pkg_size);
+		LOG_ERROR(LOADER, "PKG data size mismatch (data_size=0x%llx, data_offset=0x%llx, file_size=0x%llx)", header.data_size, header.data_offset, header.pkg_size);
 		return false;
 	}
 
-	return true;
-}
+	be_t<u32> drm_type{0};
+	be_t<u32> content_type{0};
 
-// PKG Decryption
-bool Unpack(const fs::file& pkg_f, std::string dir)
-{
-	// Save current file offset (probably zero)
-	const u64 start_offset = pkg_f.seek(0, fsm::cur);
+	pkg_f.seek(header.pkg_info_off);
 
-	// Get basic PKG information
-	PKGHeader header;
-
-	if (pkg_f.read(&header, sizeof(PKGHeader)) != sizeof(PKGHeader))
+	for (u32 i = 0; i < header.pkg_info_num; i++)
 	{
-		LOG_ERROR(LOADER, "PKG: Package file is too short!");
-		return false;
+		struct packet_T
+		{
+			be_t<u32> id;
+			be_t<u32> size;
+		} packet;
+		
+		pkg_f.read(packet);
+
+		// TODO
+		switch (+packet.id)
+		{
+		case 0x1:
+		{
+			if (packet.size == sizeof(drm_type))
+			{
+				pkg_f.read(drm_type);
+				continue;
+			}
+
+			break;
+		}
+		case 0x2:
+		{
+			if (packet.size == sizeof(content_type))
+			{
+				pkg_f.read(content_type);
+				continue;
+			}
+
+			break;
+		}
+		}
+
+		pkg_f.seek(packet.size, fs::seek_cur);
 	}
 
-	if (!CheckHeader(pkg_f, header))
-	{
-		return false;
-	}
-
-	aes_context c;
-
-	u8 iv[HASH_LEN];
-	be_t<u64>& hi = (be_t<u64>&)iv[0];
-	be_t<u64>& lo = (be_t<u64>&)iv[8];
-
-	// Allocate buffers with BUF_SIZE size or more if required
-	const u64 buffer_size = std::max<u64>(BUF_SIZE, sizeof(PKGEntry) * header.file_count);
-
-	const std::unique_ptr<u8[]> buf(new u8[buffer_size]), ctr(new u8[buffer_size]);
-
-	// Debug key
-	u8 key[0x40] = {};
-	memcpy(key + 0x00, &header.qa_digest[0], 8); // &data[0x60]
-	memcpy(key + 0x08, &header.qa_digest[0], 8); // &data[0x60]
-	memcpy(key + 0x10, &header.qa_digest[8], 8); // &data[0x68]
-	memcpy(key + 0x18, &header.qa_digest[8], 8); // &data[0x68]
+	// Allocate buffer with BUF_SIZE size or more if required
+	const std::unique_ptr<u128[]> buf(new u128[std::max<u64>(BUF_SIZE, sizeof(PKGEntry) * header.file_count) / sizeof(u128)]);
 
 	// Define decryption subfunction (`psp` arg selects the key for specific block)
-	auto decrypt = [&](u64 offset, u64 size, bool psp)
+	auto decrypt = [&](u64 offset, u64 size, const uchar* key) -> u64
 	{
-		// Initialize buffer
-		std::memset(buf.get(), 0, size);
-
-		// Read the data
 		pkg_f.seek(start_offset + header.data_offset + offset);
-		size = pkg_f.read(buf.get(), size);
-		const u64 bits = (size + HASH_LEN - 1) / HASH_LEN;
+
+		// Read the data and set available size
+		const u64 read = pkg_f.read(buf.get(), size);
+
+		// Get block count
+		const u64 blocks = (read + 15) / 16;
 
 		if (header.pkg_type == PKG_RELEASE_TYPE_DEBUG)
 		{
-			for (u64 j = 0; j < bits; j++)
+			// Debug key
+			be_t<u64> input[8] =
 			{
-				u8 hash[0x14];
-				sha1(key, 0x40, hash);
-				*(u64*)&buf[j * HASH_LEN + 0] ^= *(u64*)&hash[0];
-				*(u64*)&buf[j * HASH_LEN + 8] ^= *(u64*)&hash[8];
-				*(be_t<u64>*)&key[0x38] += 1;
+				header.qa_digest[0],
+				header.qa_digest[0],
+				header.qa_digest[1],
+				header.qa_digest[1],
+			};
+
+			for (u64 i = 0; i < blocks; i++)
+			{
+				// Initialize stream cipher for current position
+				input[7] = offset / 16 + i;
+
+				union sha1_hash
+				{
+					u8 data[20];
+					u128 _v128;
+				} hash;
+				
+				sha1(reinterpret_cast<const u8*>(input), sizeof(input), hash.data);
+
+				buf[i] ^= hash._v128;
 			}
 		}
 
 		if (header.pkg_type == PKG_RELEASE_TYPE_RELEASE)
 		{
-			// Set decryption key
-			aes_setkey_enc(&c, psp ? PKG_AES_KEY2 : PKG_AES_KEY, 128);
+			aes_context ctx;
 
-			// Initialize `iv` for the specific position
-			memcpy(iv, header.klicensee, sizeof(iv));
-			if (lo + offset / HASH_LEN < lo) hi++;
-			lo += offset / HASH_LEN;
+			// Set encryption key for stream cipher
+			aes_setkey_enc(&ctx, key, 128);
 
-			for (u64 j = 0; j < bits; j++)
+			// Initialize stream cipher for start position
+			be_t<u128> input = header.klicensee.value() + offset / 16;
+
+			// Increment stream position for every block
+			for (u64 i = 0; i < blocks; i++, input++)
 			{
-				aes_crypt_ecb(&c, AES_ENCRYPT, iv, ctr.get() + j * HASH_LEN);
+				u128 key;
 
-				if (!++lo)
-				{
-					hi++;
-				}
-			}
+				aes_crypt_ecb(&ctx, AES_ENCRYPT, reinterpret_cast<const u8*>(&input), reinterpret_cast<u8*>(&key));
 
-			for (u64 j = 0; j < size; j++)
-			{
-				buf[j] ^= ctr[j];
+				buf[i] ^= key;
 			}
 		}
+
+		// Return the amount of data written in buf
+		return read;
 	};
 
-	wxProgressDialog pdlg("PKG Decrypter / Installer", "Please wait, decrypting...", header.file_count, 0, wxPD_AUTO_HIDE | wxPD_APP_MODAL);
+	std::array<uchar, 16> dec_key;
 
-	decrypt(0, header.file_count * sizeof(PKGEntry), header.pkg_platform == PKG_PLATFORM_TYPE_PSP);
+	if (header.pkg_platform == PKG_PLATFORM_TYPE_PSP && content_type >= 0x15 && content_type <= 0x17)
+	{
+		const uchar psp2t1[] = {0xE3, 0x1A, 0x70, 0xC9, 0xCE, 0x1D, 0xD7, 0x2B, 0xF3, 0xC0, 0x62, 0x29, 0x63, 0xF2, 0xEC, 0xCB};
+		const uchar psp2t2[] = {0x42, 0x3A, 0xCA, 0x3A, 0x2B, 0xD5, 0x64, 0x9F, 0x96, 0x86, 0xAB, 0xAD, 0x6F, 0xD8, 0x80, 0x1F};
+		const uchar psp2t3[] = {0xAF, 0x07, 0xFD, 0x59, 0x65, 0x25, 0x27, 0xBA, 0xF1, 0x33, 0x89, 0x66, 0x8B, 0x17, 0xD9, 0xEA};
+
+		aes_context ctx;
+		aes_setkey_enc(&ctx, content_type == 0x15 ? psp2t1 : content_type == 0x16 ? psp2t2 : psp2t3, 128);
+		aes_crypt_ecb(&ctx, AES_ENCRYPT, reinterpret_cast<const uchar*>(&header.klicensee), dec_key.data());
+		decrypt(0, header.file_count * sizeof(PKGEntry), dec_key.data());
+	}
+	else
+	{
+		std::memcpy(dec_key.data(), PKG_AES_KEY, dec_key.size());
+		decrypt(0, header.file_count * sizeof(PKGEntry), header.pkg_platform == PKG_PLATFORM_TYPE_PSP ? PKG_AES_KEY2 : dec_key.data());
+	}
 
 	std::vector<PKGEntry> entries(header.file_count);
 
 	std::memcpy(entries.data(), buf.get(), entries.size() * sizeof(PKGEntry));
 
-	for (s32 i = 0; i < entries.size(); i++)
+	for (const auto& entry : entries)
 	{
-		const PKGEntry& entry = entries[i];
-
 		const bool is_psp = (entry.type & PKG_FILE_ENTRY_PSP) != 0;
 
-		decrypt(entry.name_offset, entry.name_size, is_psp);
+		if (entry.name_size > 256)
+		{
+			LOG_ERROR(LOADER, "PKG name size is too big (0x%x)", entry.name_size);
+			continue;
+		}
+
+		decrypt(entry.name_offset, entry.name_size, is_psp ? PKG_AES_KEY2 : dec_key.data());
 
 		const std::string name(reinterpret_cast<char*>(buf.get()), entry.name_size);
+
+		LOG_NOTICE(LOADER, "Entry 0x%08x: %s", entry.type, name);
 
 		switch (entry.type & 0xff)
 		{
@@ -178,42 +217,75 @@ bool Unpack(const fs::file& pkg_f, std::string dir)
 		case PKG_FILE_ENTRY_SDAT:
 		case PKG_FILE_ENTRY_REGULAR:
 		case PKG_FILE_ENTRY_UNK1:
+		case 0xe:
+		case 0x10:
+		case 0x11:
+		case 0x13:
+		case 0x15:
+		case 0x16:
 		{
 			const std::string path = dir + name;
 
-			if (fs::is_file(path))
-			{
-				LOG_WARNING(LOADER, "PKG Loader: '%s' is overwritten", path);
-			}
+			const bool did_overwrite = fs::is_file(path);
 
-			if (fs::file out{ path, fom::write | fom::create | fom::trunc })
+			if (fs::file out{ path, fs::rewrite })
 			{
 				for (u64 pos = 0; pos < entry.file_size; pos += BUF_SIZE)
 				{
 					const u64 block_size = std::min<u64>(BUF_SIZE, entry.file_size - pos);
 
-					decrypt(entry.file_offset + pos, block_size, is_psp);
+					if (decrypt(entry.file_offset + pos, block_size, is_psp ? PKG_AES_KEY2 : dec_key.data()) != block_size)
+					{
+						LOG_ERROR(LOADER, "Failed to extract file %s", path);
+						break;
+					}
 
-					out.write(buf.get(), block_size);
+					if (out.write(buf.get(), block_size) != block_size)
+					{
+						LOG_ERROR(LOADER, "Failed to write file %s", path);
+						break;
+					}
+
+					if (sync.fetch_add((block_size + 0.0) / header.data_size) < 0.)
+					{
+						LOG_ERROR(LOADER, "Package installation cancelled: %s", dir);
+						return false;
+					}
+				}
+
+				if (did_overwrite)
+				{
+					LOG_WARNING(LOADER, "Overwritten file %s", name);
+				}
+				else
+				{
+					LOG_NOTICE(LOADER, "Created file %s", name);
 				}
 			}
 			else
 			{
-				LOG_ERROR(LOADER, "PKG Loader: Could not create file '%s'", path);
-				return false;
+				LOG_ERROR(LOADER, "Failed to create file %s", path);
 			}
 
 			break;
 		}
 
 		case PKG_FILE_ENTRY_FOLDER:
+		case 0x12:
 		{
 			const std::string path = dir + name;
 
-			if (!fs::is_dir(path) && !fs::create_dir(path))
+			if (fs::create_dir(path))
 			{
-				LOG_ERROR(LOADER, "PKG Loader: Could not create directory: %s", path);
-				return false;
+				LOG_NOTICE(LOADER, "Created directory %s", name);
+			}
+			else if (fs::is_dir(path))
+			{
+				LOG_WARNING(LOADER, "Reused existing directory %s", name);
+			}
+			else
+			{
+				LOG_ERROR(LOADER, "Failed to create directory %s", path);
 			}
 
 			break;
@@ -221,13 +293,11 @@ bool Unpack(const fs::file& pkg_f, std::string dir)
 
 		default:
 		{
-			LOG_ERROR(LOADER, "PKG Loader: unknown PKG file entry: 0x%x", entry.type);
-			return false;
+			LOG_ERROR(LOADER, "Unknown PKG entry type (0x%x) %s", entry.type, name);
 		}
 		}
-
-		pdlg.Update(i + 1);
 	}
 
+	LOG_SUCCESS(LOADER, "Package successfully installed to %s", dir);
 	return true;
 }

@@ -1,445 +1,323 @@
 #pragma once
 
-const class thread_ctrl_t* get_current_thread_ctrl();
+#include "types.h"
+#include "Atomic.h"
 
-// named thread control class
-class thread_ctrl_t final
+#include <exception>
+#include <string>
+#include <memory>
+
+#include "sema.h"
+#include "cond.h"
+
+// Will report exception and call std::abort() if put in catch(...)
+[[noreturn]] void catch_all_exceptions();
+
+// Simple list of void() functors
+class task_stack
 {
-	friend class named_thread_t;
+	struct task_base
+	{
+		std::unique_ptr<task_base> next;
 
-	template<typename T> friend void current_thread_register_atexit(T);
+		virtual ~task_base();
 
-	// thread handler
-	std::thread m_thread;
+		virtual void invoke()
+		{
+			if (next)
+			{
+				next->invoke();
+			}
+		}
+	};
 
-	// name getter
-	const std::function<std::string()> m_name;
+	template <typename F>
+	struct task_type final : task_base
+	{
+		std::remove_reference_t<F> func;
 
-	// functions executed at thread exit (temporarily)
-	std::vector<std::function<void()>> m_atexit;
+		task_type(F&& func)
+			: func(std::forward<F>(func))
+		{
+		}
+
+		void invoke() final override
+		{
+			func();
+			task_base::invoke();
+		}
+	};
+
+	std::unique_ptr<task_base> m_stack;
 
 public:
-	thread_ctrl_t(std::function<std::string()> name)
-		: m_name(std::move(name))
+	task_stack() = default;
+
+	template <typename F>
+	task_stack(F&& func)
+		: m_stack(new task_type<F>(std::forward<F>(func)))
 	{
 	}
 
-	// get thread name
-	std::string get_name() const;
+	void push(task_stack stack)
+	{
+		auto _top = stack.m_stack.release();
+		auto _next = m_stack.release();
+		m_stack.reset(_top);
+		while (UNLIKELY(_top->next)) _top = _top->next.get();
+		_top->next.reset(_next);
+	}
+
+	void reset()
+	{
+		m_stack.reset();
+	}
+
+	void invoke() const
+	{
+		if (m_stack)
+		{
+			m_stack->invoke();
+		}
+	}
 };
 
-// register function at thread exit (temporarily)
-template<typename T> void current_thread_register_atexit(T func)
+// Thread control class
+class thread_ctrl final
 {
-	extern thread_local thread_ctrl_t* g_tls_this_thread;
+	// Current thread
+	static thread_local thread_ctrl* g_tls_this_thread;
 
-	g_tls_this_thread->m_atexit.emplace_back(func);
-}
+	// Self pointer
+	std::shared_ptr<thread_ctrl> m_self;
 
-class named_thread_t
-{
-	// pointer to managed resource (shared with actual thread)
-	std::shared_ptr<thread_ctrl_t> m_thread;
+	// Thread handle (platform-specific)
+	atomic_t<std::uintptr_t> m_thread{0};
+
+	// Thread mutex
+	mutable semaphore<> m_mutex;
+
+	// Thread condition variable
+	cond_variable m_cond;
+
+	// Thread flags
+	atomic_t<u32> m_signal{0};
+
+	// Thread joining condition variable
+	cond_variable m_jcv;
+
+	// Remotely set or caught exception
+	std::exception_ptr m_exception;
+
+	// Thread initial task or atexit task
+	task_stack m_task;
+
+	// Fixed name
+	std::string m_name;
+
+	// Start thread
+	static void start(const std::shared_ptr<thread_ctrl>&, task_stack);
+
+	// Called at the thread start
+	void initialize();
+
+	// Called at the thread end
+	void finalize(std::exception_ptr) noexcept;
+
+	// Add task (atexit)
+	static void _push(task_stack);
+
+	// Internal waiting function, may throw. Infinite value is -1.
+	static bool _wait_for(u64 usec);
+
+	// Internal throwing function. Mutex must be locked and will be unlocked.
+	[[noreturn]] void _throw();
+
+	// Internal notification function
+	void _notify(cond_variable thread_ctrl::*);
 
 public:
-	// thread mutex for external use
-	std::mutex mutex;
+	thread_ctrl(std::string&& name);
 
-	// thread condition variable for external use
-	std::condition_variable cv;
+	thread_ctrl(const thread_ctrl&) = delete;
 
-public:
-	// initialize in empty state
-	named_thread_t() = default;
+	~thread_ctrl();
 
-	// create named thread
-	named_thread_t(std::function<std::string()> name, std::function<void()> func);
+	// Get thread name
+	const std::string& get_name() const
+	{
+		return m_name;
+	}
 
-	// destructor, will terminate if thread is neither joined nor detached
-	virtual ~named_thread_t();
+	// Get exception
+	std::exception_ptr get_exception() const;
 
-	named_thread_t(const named_thread_t&) = delete;
+	// Set exception
+	void set_exception(std::exception_ptr ptr);
 
-	named_thread_t& operator =(const named_thread_t&) = delete;
-
-public:
-	// get thread name
-	std::string get_name() const;
-
-	// create named thread (current state must be empty)
-	void start(std::function<std::string()> name, std::function<void()> func);
-
-	// detach thread -> empty state
-	void detach();
-
-	// join thread -> empty state
+	// Get thread result (may throw, simultaneous joining allowed)
 	void join();
 
-	// check if not empty
-	bool joinable() const { return m_thread.operator bool(); }
+	// Notify the thread
+	void notify();
 
-	// check whether it is the current running thread
-	bool is_current() const;
+	// Wait once with timeout. Abortable, may throw. May spuriously return false.
+	static inline bool wait_for(u64 usec)
+	{
+		return _wait_for(usec);
+	}
 
-	// get internal thread pointer
-	const thread_ctrl_t* get_thread_ctrl() const { return m_thread.get(); }
+	// Wait. Abortable, may throw.
+	static inline void wait()
+	{
+		_wait_for(-1);
+	}
+
+	// Wait until pred(). Abortable, may throw.
+	template<typename F, typename RT = std::result_of_t<F()>>
+	static inline RT wait(F&& pred)
+	{
+		while (true)
+		{
+			if (RT result = pred())
+			{
+				return result;
+			}
+
+			_wait_for(-1);
+		}
+	}
+
+	// Wait eternally until aborted.
+	[[noreturn]] static inline void eternalize()
+	{
+		while (true)
+		{
+			_wait_for(-1);
+		}
+	}
+
+	// Test exception (may throw).
+	static void test();
+
+	// Get current thread (may be nullptr)
+	static thread_ctrl* get_current()
+	{
+		return g_tls_this_thread;
+	}
+
+	// Register function at thread exit (for the current thread)
+	template<typename F>
+	static inline void atexit(F&& func)
+	{
+		_push(std::forward<F>(func));
+	}
+
+	// Create detached named thread
+	template<typename N, typename F>
+	static inline void spawn(N&& name, F&& func)
+	{
+		auto out = std::make_shared<thread_ctrl>(std::forward<N>(name));
+
+		thread_ctrl::start(out, std::forward<F>(func));
+	}
+
+	// Named thread factory
+	template<typename N, typename F>
+	static inline void spawn(std::shared_ptr<thread_ctrl>& out, N&& name, F&& func)
+	{
+		out = std::make_shared<thread_ctrl>(std::forward<N>(name));
+
+		thread_ctrl::start(out, std::forward<F>(func));
+	}
+
+	static void set_native_priority(int priority);
+	static void set_ideal_processor_core(int core);
 };
 
-class autojoin_thread_t final : private named_thread_t
+class named_thread
 {
-public:
-	using named_thread_t::mutex;
-	using named_thread_t::cv;
+	// Pointer to managed resource (shared with actual thread)
+	std::shared_ptr<thread_ctrl> m_thread;
 
 public:
-	autojoin_thread_t() = delete;
+	named_thread();
 
-	autojoin_thread_t(std::function<std::string()> name, std::function<void()> func)
+	virtual ~named_thread();
+
+	// Deleted copy/move constructors + copy/move operators
+	named_thread(const named_thread&) = delete;
+
+	// Get thread name
+	virtual std::string get_name() const;
+
+protected:
+	// Start thread (cannot be called from the constructor: should throw in such case)
+	void start_thread(const std::shared_ptr<void>& _this);
+
+	// Thread task (called in the thread)
+	virtual void on_task() = 0;
+
+	// Thread finalization (called after on_task)
+	virtual void on_exit() {}
+
+	// Called once upon thread spawn within the thread's own context
+	virtual void on_spawn() {}
+
+public:
+	// ID initialization
+	virtual void on_init(const std::shared_ptr<void>& _this)
 	{
-		start(std::move(name), std::move(func));
+		return start_thread(_this);
 	}
 
-	virtual ~autojoin_thread_t() override
+	// ID finalization
+	virtual void on_stop()
 	{
-		join();
+		m_thread->join();
 	}
 
-	using named_thread_t::is_current;
+	// Access thread_ctrl
+	thread_ctrl* get() const
+	{
+		return m_thread.get();
+	}
+
+	void join() const
+	{
+		return m_thread->join();
+	}
+
+	void notify() const
+	{
+		return m_thread->notify();
+	}
 };
 
-extern const std::function<bool()> SQUEUE_ALWAYS_EXIT;
-extern const std::function<bool()> SQUEUE_NEVER_EXIT;
-
-bool squeue_test_exit();
-
-template<typename T, u32 sq_size = 256>
-class squeue_t
+// Wrapper for named thread, joins automatically in the destructor, can only be used in function scope
+class scope_thread final
 {
-	struct squeue_sync_var_t
-	{
-		struct
-		{
-			u32 position : 31;
-			u32 pop_lock : 1;
-		};
-		struct
-		{
-			u32 count : 31;
-			u32 push_lock : 1;
-		};
-	};
-
-	atomic_t<squeue_sync_var_t> m_sync;
-
-	mutable std::mutex m_rcv_mutex;
-	mutable std::mutex m_wcv_mutex;
-	mutable std::condition_variable m_rcv;
-	mutable std::condition_variable m_wcv;
-
-	T m_data[sq_size];
-
-	enum squeue_sync_var_result : u32
-	{
-		SQSVR_OK = 0,
-		SQSVR_LOCKED = 1,
-		SQSVR_FAILED = 2,
-	};
+	std::shared_ptr<thread_ctrl> m_thread;
 
 public:
-	squeue_t()
-		: m_sync({})
+	template<typename N, typename F>
+	scope_thread(N&& name, F&& func)
 	{
+		thread_ctrl::spawn(m_thread, std::forward<N>(name), std::forward<F>(func));
 	}
 
-	u32 get_max_size() const
+	// Deleted copy/move constructors + copy/move operators
+	scope_thread(const scope_thread&) = delete;
+
+	// Destructor with exceptions allowed
+	~scope_thread() noexcept(false)
 	{
-		return sq_size;
+		m_thread->join();
 	}
 
-	bool is_full() const volatile
+	// Access thread_ctrl
+	thread_ctrl* get() const
 	{
-		return m_sync.data.count == sq_size;
-	}
-
-	bool push(const T& data, const std::function<bool()>& test_exit)
-	{
-		u32 pos = 0;
-
-		while (u32 res = m_sync.atomic_op([&pos](squeue_sync_var_t& sync) -> u32
-		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-
-			if (sync.push_lock)
-			{
-				return SQSVR_LOCKED;
-			}
-			if (sync.count == sq_size)
-			{
-				return SQSVR_FAILED;
-			}
-
-			sync.push_lock = 1;
-			pos = sync.position + sync.count;
-			return SQSVR_OK;
-		}))
-		{
-			if (res == SQSVR_FAILED && (test_exit() || squeue_test_exit()))
-			{
-				return false;
-			}
-
-			std::unique_lock<std::mutex> wcv_lock(m_wcv_mutex);
-			m_wcv.wait_for(wcv_lock, std::chrono::milliseconds(1));
-		}
-
-		m_data[pos >= sq_size ? pos - sq_size : pos] = data;
-
-		m_sync.atomic_op([](squeue_sync_var_t& sync)
-		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-			assert(sync.push_lock);
-			sync.push_lock = 0;
-			sync.count++;
-		});
-
-		m_rcv.notify_one();
-		m_wcv.notify_one();
-		return true;
-	}
-
-	bool push(const T& data, const volatile bool* do_exit)
-	{
-		return push(data, [do_exit](){ return do_exit && *do_exit; });
-	}
-
-	force_inline bool push(const T& data)
-	{
-		return push(data, SQUEUE_NEVER_EXIT);
-	}
-
-	force_inline bool try_push(const T& data)
-	{
-		return push(data, SQUEUE_ALWAYS_EXIT);
-	}
-
-	bool pop(T& data, const std::function<bool()>& test_exit)
-	{
-		u32 pos = 0;
-
-		while (u32 res = m_sync.atomic_op([&pos](squeue_sync_var_t& sync) -> u32
-		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-
-			if (!sync.count)
-			{
-				return SQSVR_FAILED;
-			}
-			if (sync.pop_lock)
-			{
-				return SQSVR_LOCKED;
-			}
-
-			sync.pop_lock = 1;
-			pos = sync.position;
-			return SQSVR_OK;
-		}))
-		{
-			if (res == SQSVR_FAILED && (test_exit() || squeue_test_exit()))
-			{
-				return false;
-			}
-
-			std::unique_lock<std::mutex> rcv_lock(m_rcv_mutex);
-			m_rcv.wait_for(rcv_lock, std::chrono::milliseconds(1));
-		}
-
-		data = m_data[pos];
-
-		m_sync.atomic_op([](squeue_sync_var_t& sync)
-		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-			assert(sync.pop_lock);
-			sync.pop_lock = 0;
-			sync.position++;
-			sync.count--;
-			if (sync.position == sq_size)
-			{
-				sync.position = 0;
-			}
-		});
-
-		m_rcv.notify_one();
-		m_wcv.notify_one();
-		return true;
-	}
-
-	bool pop(T& data, const volatile bool* do_exit)
-	{
-		return pop(data, [do_exit](){ return do_exit && *do_exit; });
-	}
-
-	force_inline bool pop(T& data)
-	{
-		return pop(data, SQUEUE_NEVER_EXIT);
-	}
-
-	force_inline bool try_pop(T& data)
-	{
-		return pop(data, SQUEUE_ALWAYS_EXIT);
-	}
-
-	bool peek(T& data, u32 start_pos, const std::function<bool()>& test_exit)
-	{
-		assert(start_pos < sq_size);
-		u32 pos = 0;
-
-		while (u32 res = m_sync.atomic_op([&pos, start_pos](squeue_sync_var_t& sync) -> u32
-		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-
-			if (sync.count <= start_pos)
-			{
-				return SQSVR_FAILED;
-			}
-			if (sync.pop_lock)
-			{
-				return SQSVR_LOCKED;
-			}
-
-			sync.pop_lock = 1;
-			pos = sync.position + start_pos;
-			return SQSVR_OK;
-		}))
-		{
-			if (res == SQSVR_FAILED && (test_exit() || squeue_test_exit()))
-			{
-				return false;
-			}
-
-			std::unique_lock<std::mutex> rcv_lock(m_rcv_mutex);
-			m_rcv.wait_for(rcv_lock, std::chrono::milliseconds(1));
-		}
-
-		data = m_data[pos >= sq_size ? pos - sq_size : pos];
-
-		m_sync.atomic_op([](squeue_sync_var_t& sync)
-		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-			assert(sync.pop_lock);
-			sync.pop_lock = 0;
-		});
-
-		m_rcv.notify_one();
-		return true;
-	}
-
-	bool peek(T& data, u32 start_pos, const volatile bool* do_exit)
-	{
-		return peek(data, start_pos, [do_exit](){ return do_exit && *do_exit; });
-	}
-
-	force_inline bool peek(T& data, u32 start_pos = 0)
-	{
-		return peek(data, start_pos, SQUEUE_NEVER_EXIT);
-	}
-
-	force_inline bool try_peek(T& data, u32 start_pos = 0)
-	{
-		return peek(data, start_pos, SQUEUE_ALWAYS_EXIT);
-	}
-
-	class squeue_data_t
-	{
-		T* const m_data;
-		const u32 m_pos;
-		const u32 m_count;
-
-		squeue_data_t(T* data, u32 pos, u32 count)
-			: m_data(data)
-			, m_pos(pos)
-			, m_count(count)
-		{
-		}
-
-	public:
-		T& operator [] (u32 index)
-		{
-			assert(index < m_count);
-			index += m_pos;
-			index = index < sq_size ? index : index - sq_size;
-			return m_data[index];
-		}
-	};
-
-	void process(void(*proc)(squeue_data_t data))
-	{
-		u32 pos, count;
-
-		while (m_sync.atomic_op([&pos, &count](squeue_sync_var_t& sync) -> u32
-		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-
-			if (sync.pop_lock || sync.push_lock)
-			{
-				return SQSVR_LOCKED;
-			}
-
-			pos = sync.position;
-			count = sync.count;
-			sync.pop_lock = 1;
-			sync.push_lock = 1;
-			return SQSVR_OK;
-		}))
-		{
-			std::unique_lock<std::mutex> rcv_lock(m_rcv_mutex);
-			m_rcv.wait_for(rcv_lock, std::chrono::milliseconds(1));
-		}
-
-		proc(squeue_data_t(m_data, pos, count));
-
-		m_sync.atomic_op([](squeue_sync_var_t& sync)
-		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-			assert(sync.pop_lock && sync.push_lock);
-			sync.pop_lock = 0;
-			sync.push_lock = 0;
-		});
-
-		m_wcv.notify_one();
-		m_rcv.notify_one();
-	}
-
-	void clear()
-	{
-		while (m_sync.atomic_op([](squeue_sync_var_t& sync) -> u32
-		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-
-			if (sync.pop_lock || sync.push_lock)
-			{
-				return SQSVR_LOCKED;
-			}
-
-			sync.pop_lock = 1;
-			sync.push_lock = 1;
-			return SQSVR_OK;
-		}))
-		{
-			std::unique_lock<std::mutex> rcv_lock(m_rcv_mutex);
-			m_rcv.wait_for(rcv_lock, std::chrono::milliseconds(1));
-		}
-
-		m_sync.exchange({});
-		m_wcv.notify_one();
-		m_rcv.notify_one();
+		return m_thread.get();
 	}
 };

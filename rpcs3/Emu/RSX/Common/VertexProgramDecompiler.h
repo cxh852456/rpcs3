@@ -1,6 +1,7 @@
 #pragma once
 #include "Emu/RSX/RSXVertexProgram.h"
 #include <vector>
+#include <set>
 #include <sstream>
 #include "ShaderParam.h"
 
@@ -19,6 +20,12 @@
 */
 struct VertexProgramDecompiler
 {
+	D0 d0;
+	D1 d1;
+	D2 d2;
+	D3 d3;
+	SRC src[3];
+
 	struct FuncInfo
 	{
 		u32 offset;
@@ -51,9 +58,10 @@ struct VertexProgramDecompiler
 
 	//wxString main;
 
-	std::vector<u32>& m_data;
+	const std::vector<u32>& m_data;
 	ParamArray m_parr;
 
+	std::string NotZeroPositive(const std::string code);
 	std::string GetMask(bool is_sca);
 	std::string GetVecMask();
 	std::string GetScaMask();
@@ -62,8 +70,10 @@ struct VertexProgramDecompiler
 	std::string GetFunc();
 	std::string GetTex();
 	std::string GetCond();
+	std::string GetOptionalBranchCond();	//Conditional branch expression modified externally at runtime
 	std::string AddAddrMask();
 	std::string AddAddrReg();
+	std::string AddAddrRegWithoutMask();
 	u32 GetAddr();
 	std::string Format(const std::string& code);
 
@@ -80,12 +90,16 @@ protected:
 	*/
 	virtual std::string getFloatTypeName(size_t elementCount) = 0;
 
+	/** returns the type name of int vectors.
+	*/
+	virtual std::string getIntTypeName(size_t elementCount) = 0;
+
 	/** returns string calling function where arguments are passed via
 	* $0 $1 $2 substring.
 	*/
 	virtual std::string getFunction(FUNCTION) = 0;
 
-	/** returns string calling comparaison function on 2 args passed as strings.
+	/** returns string calling comparison function on 2 args passed as strings.
 	*/
 	virtual std::string compareFunction(COMPARE, const std::string &, const std::string &) = 0;
 
@@ -113,6 +127,6 @@ protected:
 	*/
 	virtual void insertMainEnd(std::stringstream &OS) = 0;
 public:
-	VertexProgramDecompiler(std::vector<u32>& data);
+	VertexProgramDecompiler(const RSXVertexProgram& prog);
 	std::string Decompile();
 };

@@ -1,207 +1,138 @@
 #pragma once
 #include "Emu/RSX/GSRender.h"
-#include "GLBuffers.h"
-
-#define RSX_DEBUG 1
-
-
+#include "GLHelpers.h"
+#include "GLTexture.h"
+#include "GLTextureCache.h"
+#include "GLRenderTargets.h"
+#include "restore_new.h"
+#include "Utilities/optional.hpp"
+#include "define_new_memleakdetect.h"
 #include "GLProgramBuffer.h"
+#include "GLTextOut.h"
+#include "../rsx_utils.h"
+#include "../rsx_cache.h"
 
 #pragma comment(lib, "opengl32.lib")
 
-#if RSX_DEBUG
-#define checkForGlError(sit) if((g_last_gl_error = glGetError()) != GL_NO_ERROR) printGlError(g_last_gl_error, sit)
-#else
-#define checkForGlError(sit)
-#endif
-
-extern GLenum g_last_gl_error;
-void printGlError(GLenum err, const char* situation);
-void printGlError(GLenum err, const std::string& situation);
-u32 LinearToSwizzleAddress(u32 x, u32 y, u32 z, u32 log2_width, u32 log2_height, u32 log2_depth);
-
-
-class GLTexture
+struct work_item
 {
-	u32 m_id;
+	std::condition_variable cv;
+	std::mutex guard_mutex;
 
-public:
-	GLTexture() : m_id(0)
-	{
-	}
+	u32  address_to_flush = 0;
+	gl::texture_cache::cached_texture_section *section_to_flush = nullptr;
 
-	void Create();
-
-	int GetGlWrap(int wrap);
-
-	float GetMaxAniso(int aniso);
-
-	inline static u8 Convert4To8(u8 v)
-	{
-		// Swizzle bits: 00001234 -> 12341234
-		return (v << 4) | (v);
-	}
-
-	inline static u8 Convert5To8(u8 v)
-	{
-		// Swizzle bits: 00012345 -> 12345123
-		return (v << 3) | (v >> 2);
-	}
-
-	inline static u8 Convert6To8(u8 v)
-	{
-		// Swizzle bits: 00123456 -> 12345612
-		return (v << 2) | (v >> 4);
-	}
-
-	void Init(RSXTexture& tex);
-
-	void Save(RSXTexture& tex, const std::string& name);
-
-	void Save(RSXTexture& tex);
-
-	void Bind();
-
-	void Unbind();
-
-	void Delete();
+	volatile bool processed = false;
+	volatile bool result = false;
+	volatile bool received = false;
 };
 
-class PostDrawObj
-{
-protected:
-	GLFragmentProgram m_fp;
-	GLVertexProgram m_vp;
-	GLProgram m_program;
-	GLfbo m_fbo;
-	GLrbo m_rbo;
-
-public:
-	virtual void Draw();
-
-	virtual void InitializeShaders() = 0;
-	virtual void InitializeLocations() = 0;
-
-	void Initialize();
-};
-
-class DrawCursorObj : public PostDrawObj
-{
-	u32 m_tex_id;
-	void* m_pixels;
-	u32 m_width, m_height;
-	double m_pos_x, m_pos_y, m_pos_z;
-	bool m_update_texture, m_update_pos;
-
-public:
-	DrawCursorObj() : PostDrawObj()
-		, m_tex_id(0)
-		, m_update_texture(false)
-		, m_update_pos(false)
-	{
-	}
-
-	virtual void Draw();
-
-	virtual void InitializeShaders();
-
-	void SetTexture(void* pixels, int width, int height);
-
-	void SetPosition(float x, float y, float z = 0.0f);
-
-	void InitializeLocations();
-};
-
-class GSFrameBase
-{
-public:
-	GSFrameBase() {}
-	GSFrameBase(const GSFrameBase&) = delete;
-	virtual void Close() = 0;
-
-	virtual bool IsShown() = 0;
-	virtual void Hide() = 0;
-	virtual void Show() = 0;
-
-	virtual void* GetNewContext() = 0;
-	virtual void SetCurrent(void* ctx) = 0;
-	virtual void DeleteContext(void* ctx) = 0;
-	virtual void Flip(void* ctx) = 0;
-
-};
-
-typedef GSFrameBase*(*GetGSFrameCb)();
-
-void SetGetGSFrameCallback(GetGSFrameCb value);
-
-class GLGSRender final : public GSRender
+class GLGSRender : public GSRender
 {
 private:
-	std::vector<u8> m_vdata;
-	std::vector<PostDrawObj> m_post_draw_objs;
-
-	GLProgram m_program;
-	int m_fp_buf_num;
-	int m_vp_buf_num;
-	GLProgramBuffer m_prog_buffer;
-
 	GLFragmentProgram m_fragment_prog;
 	GLVertexProgram m_vertex_prog;
 
-	GLTexture m_gl_textures[m_textures_count];
-	GLTexture m_gl_vertex_textures[m_textures_count];
+	rsx::gl::texture m_gl_textures[rsx::limits::fragment_textures_count];
+	rsx::gl::texture m_gl_vertex_textures[rsx::limits::vertex_textures_count];
+	gl::sampler_state m_gl_sampler_states[rsx::limits::fragment_textures_count];
 
-	GLvao m_vao;
-	GLvbo m_vbo;
-	GLrbo m_rbo;
-	GLfbo m_fbo;
+	gl::glsl::program *m_program;
 
-	void* m_context;
+	gl_render_targets m_rtts;
+
+	gl::texture_cache m_gl_texture_cache;
+
+	gl::texture m_gl_attrib_buffers[rsx::limits::vertex_count];
+
+	std::unique_ptr<gl::ring_buffer> m_attrib_ring_buffer;
+	std::unique_ptr<gl::ring_buffer> m_fragment_constants_buffer;
+	std::unique_ptr<gl::ring_buffer> m_transform_constants_buffer;
+	std::unique_ptr<gl::ring_buffer> m_scale_offset_buffer;
+	std::unique_ptr<gl::ring_buffer> m_index_ring_buffer;
+
+	u32 m_draw_calls = 0;
+	s64 m_begin_time = 0;
+	s64 m_draw_time = 0;
+	s64 m_vertex_upload_time = 0;
+	s64 m_textures_upload_time = 0;
+
+	//Compare to see if transform matrix have changed
+	size_t m_transform_buffer_hash = 0;
+
+	GLint m_min_texbuffer_alignment = 256;
+	GLint m_uniform_buffer_offset_align = 256;
+
+	bool manually_flush_ring_buffers = false;
+
+	gl::text_writer m_text_printer;
+
+	std::mutex queue_guard;
+	std::list<work_item> work_queue;
+
+	bool framebuffer_status_valid = false;
+
+	rsx::gcm_framebuffer_info surface_info[rsx::limits::color_buffers_count];
+	rsx::gcm_framebuffer_info depth_surface_info;
+
+	bool flush_draw_buffers = false;
+
+	bool m_last_draw_indexed;
+	GLenum m_last_ib_type;
+	size_t m_last_index_offset;
+	u32 m_last_vertex_count;
 
 public:
-	GSFrameBase* m_frame;
-	u32 m_draw_frames;
-	u32 m_skip_frames;
-	bool is_intel_vendor;
-	
-	GLGSRender();
-	virtual ~GLGSRender() override;
+	gl::fbo draw_fbo;
 
 private:
-	void EnableVertexData(bool indexed_draw = false);
-	void DisableVertexData();
-	void InitVertexData();
-	void InitFragmentData();
+	GLProgramBuffer m_prog_buffer;
 
-	void Enable(bool enable, const u32 cap);
-	virtual void Close() override;
-	bool LoadProgram();
-	void WriteBuffers();
-	void WriteDepthBuffer();
-	void WriteColorBuffers();
-	void WriteColorBufferA();
-	void WriteColorBufferB();
-	void WriteColorBufferC();
-	void WriteColorBufferD();
+	//buffer
+	gl::fbo m_flip_fbo;
+	gl::texture m_flip_tex_color;
 
-	void DrawObjects();
-	void InitDrawBuffers();
+	//vaos are mandatory for core profile
+	gl::vao m_vao;
+
+public:
+	GLGSRender();
+
+private:
+	static u32 enable(u32 enable, u32 cap);
+	static u32 enable(u32 enable, u32 cap, u32 index);
+
+	// Return element to draw and in case of indexed draw index type and offset in index buffer
+	std::tuple<u32, std::optional<std::tuple<GLenum, u32> > > set_vertex_buffer();
+
+	void clear_surface(u32 arg);
+
+public:
+	bool load_program();
+	void init_buffers(bool skip_reading = false);
+	void read_buffers();
+	void write_buffers();
+	void set_viewport();
+
+	void synchronize_buffers();
+	work_item& post_flush_request(u32 address, gl::texture_cache::cached_texture_section *section);
+
+	bool scaled_image_from_memory(rsx::blit_src_info& src_info, rsx::blit_dst_info& dst_info, bool interpolate) override;
 
 protected:
-	virtual void OnInit() override;
-	virtual void OnInitThread() override;
-	virtual void OnExitThread() override;
-	virtual void OnReset() override;
-	virtual void Clear(u32 cmd) override;
-	virtual void Draw() override;
-	virtual void Flip() override;
+	void begin() override;
+	void end() override;
 
-	virtual void semaphorePGRAPHTextureReadRelease(u32 offset, u32 value) override;
-	virtual void semaphorePGRAPHBackendRelease(u32 offset, u32 value) override;
-	virtual void semaphorePFIFOAcquire(u32 offset, u32 value) override;
+	void on_init_thread() override;
+	void on_exit() override;
+	bool do_method(u32 id, u32 arg) override;
+	void flip(int buffer) override;
+	u64 timestamp() const override;
 
-	virtual void notifyProgramChange() override {}
-	virtual void notifyBlendStateChange() override {}
-	virtual void notifyDepthStencilStateChange() override {}
-	virtual void notifyRasterizerStateChange() override {}
+	void do_local_task() override;
+
+	bool on_access_violation(u32 address, bool is_writing) override;
+
+	virtual std::array<std::vector<gsl::byte>, 4> copy_render_targets_to_memory() override;
+	virtual std::array<std::vector<gsl::byte>, 2> copy_depth_stencil_buffer_to_memory() override;
 };

@@ -140,8 +140,7 @@ int decompress(unsigned char *out, unsigned char *in, unsigned int size)
 	unsigned int range = 0xFFFFFFFF;
 	unsigned int code = (in[1] << 24) | (in[2] << 16) | (in[3] << 8) | in[4];
 
-	// TODO:: Syphurith: There was a check against the unsigned char head. if (head < 0) would always be false.. I don't know are you tried to if (head > 0x80)?
-	if (head < 0) // Check if we have a valid starting byte.
+	if (head > 0x80) // Check if we have a valid starting byte.
 	{
 		// The dictionary header is invalid, the data is not compressed.
 		result = -1;
@@ -253,11 +252,17 @@ int decompress(unsigned char *out, unsigned char *in, unsigned int size)
 
 				// Underflow.
 				if (buf_start < out)
+				{
+					delete[] tmp;
 					return -1;
+				}
 
 				// Overflow.
 				if (buf_end > end)
+				{
+					delete[] tmp;
 					return -1;
+				}
 
 				// Update offset.
 				offset = ((((int)(buf_end - out)) + 1) & 1) + 6;

@@ -1,8 +1,7 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "OpenGL.h"
 
-void InitProcTable()
+void gl::init()
 {
 #ifdef _WIN32
 #define OPENGL_PROC(p, n) OPENGL_PROC2(p, n, gl##n)
@@ -18,6 +17,15 @@ void InitProcTable()
 }
 
 #ifdef _WIN32
+
+extern "C"
+{
+	// NVIDIA Optimus: Default dGPU instead of iGPU (Driver: 302+)
+	__declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
+	// AMD: Request dGPU High Performance (Driver: 13.35+)
+	__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+
 #define OPENGL_PROC(p, n) p gl##n = nullptr
 #define OPENGL_PROC2(p, n, tn) OPENGL_PROC(p, n)
 	#include "GLProcTable.h"
